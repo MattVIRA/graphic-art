@@ -11,3 +11,9 @@ __pycache__/
 *.webp
 *.gif
 *.bmp
+
+dev-instructions/
+CLAUDE.md
+
+# Scripts de lancement perso
+run.sh

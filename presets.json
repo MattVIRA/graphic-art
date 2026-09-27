@@ -17,7 +17,7 @@
     "show_grid": 0.0,
     "hide_bg": 1.0,
     "curve_mode": 0.0,
-    "turbulence": 1.0,
+    "turbulence": 2.85,
     "depth": 0.0,
     "n_points": 750.0,
     "edge_boost": 0.5,
@@ -193,5 +193,5 @@
     "band6_fx": 2.0,
     "band7_fx": 1.0
   },
-  "_window": "341x770+545+1201"
+  "_window": "341x770+439+1200"
 }
