@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Fichiers média perso (test manuels, pas de dépendance code dessus)
+*.mp3
+*.wav
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.bmp
