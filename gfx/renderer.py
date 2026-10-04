@@ -12,8 +12,12 @@ pygame owns the window + GL context; we attach moderngl to it via
 moderngl.create_context().
 """
 
+import colorsys
+
 import numpy as np
 import moderngl
+
+from gfx import matcaps
 
 
 # ── Matrix helpers (row-major; act as M @ column_vector) ──────────────────────
@@ -111,15 +115,65 @@ void main() {
 # Attribute layout (11 floats):
 #   in_pos   vec3 — rest position (image xy,z | curve xy,z | star direction)
 #   in_color vec3 — base color (unused for star: computed from hue in-shader)
-#   in_aux   vec4 — curves: normal.xy, t, band | star: t, band, 0, 0 | points: 0
+#   in_aux   vec4 — curves: normal.xy, t, band | star: t, band, 0, 0
+#                   image points: edge, 0, 0, 0 | model: normal.xyz, band
 #   in_fg    f    — 1 = cut-out subject, 0 = background
 
-GPU_POINT_VS = """
+# GLSL chunks shared by the point shader and the mesh shaders (T19): pasted
+# in place of the //%NOISE% and //%MODEL% markers.
+_NOISE_GLSL = """
+float hash11(float p) {
+    p = fract(p * 0.1031); p *= p + 33.33; return fract(p * (p + p));
+}
+
+// 3D value noise (for the organic smoke-like drift)
+float vnoise(vec3 x) {
+    vec3 i = floor(x), f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    float n = dot(i, vec3(1.0, 57.0, 113.0));
+    float a = hash11(n),         b = hash11(n + 1.0);
+    float c = hash11(n + 57.0),  d = hash11(n + 58.0);
+    float e = hash11(n + 113.0), g = hash11(n + 114.0);
+    float h = hash11(n + 170.0), k = hash11(n + 171.0);
+    return mix(mix(mix(a, b, f.x), mix(c, d, f.x), f.y),
+               mix(mix(e, g, f.x), mix(h, k, f.x), f.y), f.z);
+}
+
+vec3 flownoise(vec3 p) {   // 3 decorrelated channels → drifting flow field
+    return vec3(vnoise(p),
+                vnoise(p + vec3(31.7, 0.0, 0.0)),
+                vnoise(p + vec3(0.0, 47.3, 0.0))) - 0.5;
+}
+"""
+
+# One deformation for the three model styles (points / surface / wireframe),
+# so they move identically. Neutral by default: both amounts come from the
+# Physique routing (u_inflate = Gonflement, u_mturb = Turbulence), so with no
+# routing the model stays exactly as modeled. Depends only on the rest
+# position → welded vertices stay welded (no cracks in the surface).
+_MODEL_GLSL = """
+vec3 model_displace(vec3 p, vec3 n, float g) {
+    float ph = (p.x + p.y * 0.6 + p.z * 0.3) * 0.010 - u_time * 2.2;
+    float wv = sin(ph) * u_mturb * 14.0;
+    vec3 drift = flownoise(p * 0.012 + vec3(u_time * 0.30)) * u_mturb * 6.0;
+    // the vertex's own band adds spatial texture to the breathing
+    return p + n * (u_inflate * 30.0 * (0.6 + 0.8 * g) + wv) + drift;
+}
+"""
+
+
+def _glsl(src: str) -> str:
+    return (src.replace("//%NOISE%", _NOISE_GLSL)
+               .replace("//%MODEL%", _MODEL_GLSL))
+
+
+GPU_POINT_VS = _glsl("""
 #version 330
 uniform mat4  u_mvp;
+uniform mat4  u_model;       // model rotation (normals → view space)
 uniform float u_size_scale;
 uniform float u_size_mult;
-uniform int   u_mode;        // 0 image points, 1 curves, 2 star
+uniform int   u_mode;        // 0 image points, 1 curves, 2 star, 3 3D model
 uniform float u_time;
 uniform float u_angle;
 uniform float u_turb;
@@ -134,6 +188,11 @@ uniform float u_hz11;        // 11-12 kHz  → layout stretch
 uniform float u_hz12;        // 12-14 kHz  → shimmer
 uniform float u_depth;       // relief/épaisseur : scales the points' z range
 uniform float u_edge;        // outline emphasis (0 = off)
+uniform float u_inflate;     // model: inflation along the normal (Gonflement)
+uniform float u_mturb;       // model: routed turbulence (wave + drift)
+uniform float u_model_gain;  // model: brightness compensation for point density
+uniform float u_rim;         // model: fresnel rim intensity
+uniform vec3  u_rim_color;
 // per-scope color grading: subject (fg) vs background (bg). Neutral when the
 // corresponding slider targets the whole frame (applied in the composite).
 uniform vec3  u_tint_fg;     // rgb gain × brightness
@@ -157,28 +216,8 @@ in vec4  in_aux;
 in float in_fg;
 out vec3 v_color;
 
-float hash11(float p) {
-    p = fract(p * 0.1031); p *= p + 33.33; return fract(p * (p + p));
-}
-
-// 3D value noise (for the organic smoke-like drift)
-float vnoise(vec3 x) {
-    vec3 i = floor(x), f = fract(x);
-    f = f * f * (3.0 - 2.0 * f);
-    float n = dot(i, vec3(1.0, 57.0, 113.0));
-    float a = hash11(n),         b = hash11(n + 1.0);
-    float c = hash11(n + 57.0),  d = hash11(n + 58.0);
-    float e = hash11(n + 113.0), g = hash11(n + 114.0);
-    float h = hash11(n + 170.0), k = hash11(n + 171.0);
-    return mix(mix(mix(a, b, f.x), mix(c, d, f.x), f.y),
-               mix(mix(e, g, f.x), mix(h, k, f.x), f.y), f.z);
-}
-
-vec3 flownoise(vec3 p) {   // 3 decorrelated channels → drifting flow field
-    return vec3(vnoise(p),
-                vnoise(p + vec3(31.7, 0.0, 0.0)),
-                vnoise(p + vec3(0.0, 47.3, 0.0))) - 0.5;
-}
+//%NOISE%
+//%MODEL%
 
 vec3 hsv2rgb(vec3 c) {
     vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0);
@@ -223,6 +262,19 @@ void main() {
                                     0.0, 1.0), u_mid * 0.5);
         size = 1.3 + wave * 0.8;
 
+    } else if (u_mode == 3) {                // ── 3D model, points on the surface
+        // no built-in audio reaction: all animation comes from the routing
+        vec3 n = in_aux.xyz;
+        float g = u_spectrum[int(in_aux.w + 0.5)];
+        pos = model_displace(in_pos, n, g);
+        // light the cloud like a surface: points facing the camera are
+        // brighter, grazing ones get the fresnel rim → reads as a 3D volume
+        float facing = abs(normalize(mat3(u_model) * n).z);
+        col = in_color * (0.22 + 0.40 * facing);
+        col += u_rim_color * pow(1.0 - facing, 3.0) * u_rim * 0.35;
+        col *= u_model_gain;
+        size = 1.6;
+
     } else {                                 // ── image points
         float spread = 1.0 + u_hz11 * 0.08 * u_turb;
         // traveling wave across the image (replaces most of the random drift)
@@ -264,6 +316,93 @@ void main() {
     gl_Position = clip;
     gl_PointSize = max(1.0, size * u_size_mult * u_size_scale / max(clip.w, 0.001));
     v_color = col;
+}
+""")
+
+# ── T19: 3D model surface / wireframe ────────────────────────────────────────
+# Same deformation as the model points (shared model_displace). Vertex layout:
+# pos3, normal3, color3, band1.
+
+MESH_VS = _glsl("""
+#version 330
+uniform mat4  u_mvp;
+uniform mat4  u_model;
+uniform float u_time;
+uniform float u_inflate;
+uniform float u_mturb;
+uniform float u_depth_bias;   // pushes the depth pre-pass back (hidden lines)
+uniform float u_spectrum[64];
+in vec3  in_pos;
+in vec3  in_normal;
+in vec3  in_color;
+in float in_band;
+out vec3  v_normal;
+out vec3  v_color;
+
+//%NOISE%
+//%MODEL%
+
+void main() {
+    float g = u_spectrum[int(in_band + 0.5)];
+    vec3 p = model_displace(in_pos, in_normal, g);
+    v_normal = mat3(u_model) * in_normal;
+    v_color = in_color;
+    gl_Position = u_mvp * vec4(p, 1.0);
+    gl_Position.z += u_depth_bias * gl_Position.w;
+}
+""")
+
+# Shared tail: scoped color grading (the model is always "objet").
+_MESH_GRADE_GLSL = """
+uniform vec3  u_tint_fg;
+uniform float u_con_fg;
+uniform float u_neg_fg;
+uniform float u_brm_fg;
+vec3 grade(vec3 col) {
+    col *= u_tint_fg;
+    col = max((col - 0.5) * u_con_fg + 0.5, 0.0);
+    col = mix(col, max(vec3(1.0) - col, 0.0), u_neg_fg);
+    return col * u_brm_fg;
+}
+"""
+
+SURFACE_FS = """
+#version 330
+uniform sampler2D u_matcap;
+uniform float u_rim;
+uniform vec3  u_rim_color;
+uniform float u_orig;         // 0 = pure matcap, 1 = model colors lit by it
+uniform float u_alpha;        // 1 = opaque, <1 = transparent (additive)
+in vec3  v_normal;
+in vec3  v_color;
+out vec4 f_color;
+""" + _MESH_GRADE_GLSL + """
+void main() {
+    vec3 n = normalize(v_normal);
+    if (!gl_FrontFacing) n = -n;          // open meshes: light the inside too
+    vec3 mc = texture(u_matcap, n.xy * 0.495 + 0.5).rgb;
+    float lum = dot(mc, vec3(0.299, 0.587, 0.114));
+    vec3 col = mix(mc, v_color * lum * 1.6, u_orig) * 1.1;
+    float fres = pow(1.0 - max(n.z, 0.0), 3.0);
+    col += u_rim_color * fres * u_rim;
+    f_color = vec4(grade(col) * u_alpha, 1.0);
+}
+"""
+
+WIRE_FS = """
+#version 330
+uniform float u_rim;
+uniform vec3  u_rim_color;
+uniform float u_wire_gain;    // per-model: dense meshes are dimmed
+in vec3  v_normal;
+in vec3  v_color;
+out vec4 f_color;
+""" + _MESH_GRADE_GLSL + """
+void main() {
+    float facing = abs(normalize(v_normal).z);
+    vec3 col = v_color * (0.45 + 0.55 * facing);
+    col += u_rim_color * pow(1.0 - facing, 2.0) * u_rim * 0.5;
+    f_color = vec4(grade(col) * u_wire_gain, 1.0);
 }
 """
 
@@ -447,10 +586,39 @@ class GLRenderer:
             print(f"[warning] GPU particle shader failed ({e}); CPU fallback")
             self.gpu_prog = None
 
+        # T19: 3D model surface / wireframe (GPU path only)
+        self.mesh_prog = self.wire_prog = None
+        if self.gpu_prog is not None:
+            try:
+                self.mesh_prog = ctx.program(vertex_shader=MESH_VS,
+                                             fragment_shader=SURFACE_FS)
+                self.wire_prog = ctx.program(vertex_shader=MESH_VS,
+                                             fragment_shader=WIRE_FS)
+            except Exception as e:
+                print(f"[warning] mesh shaders failed ({e}); models as points only")
+                self.mesh_prog = self.wire_prog = None
+        # programs that receive the model transform + scoped grading uniforms
+        self._model_progs = [p for p in (self.gpu_prog, self.mesh_prog,
+                                         self.wire_prog) if p is not None]
+        self._matcaps = []
+        if self.mesh_prog is not None:
+            for arr in matcaps.build_all():
+                tex = ctx.texture((arr.shape[1], arr.shape[0]), 3,
+                                  arr.tobytes(), dtype="f4")
+                tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                tex.repeat_x = tex.repeat_y = False
+                self._matcaps.append(tex)
+        self._mesh_objs = []         # GL buffers/VAOs of the current model
+        self._mesh_vaos = None
+        self._mesh_counts = {}
+        self._matcap_idx = 0
+        self._mesh_transparent = False
+
         self.fade_prog["u_bg"].value = self.bg
         self.set_post_params()  # initialize composite uniforms to neutral
         self.set_scoped_colors()   # GL uniforms default to 0 → set neutral
         self.set_scoped_fx()
+        self.set_model_look()
 
         # ── Camera ──
         self.fov = np.radians(45.0)
@@ -484,6 +652,7 @@ class GLRenderer:
         self.render_scale = 1.5
         self.bloom_radius = 0.5      # 0 = tight glow, 1 = wide halos
         self._accum_tex = None
+        self._accum_depth = None     # T19: depth for the opaque model surface
         self._accum = None
         self._bloom_tex = []         # 3 levels × ping-pong pair
         self._bloom_fbo = []
@@ -536,6 +705,7 @@ class GLRenderer:
                 t.release()
         if self._accum is not None:
             self._accum.release(); self._accum_tex.release()
+            self._accum_depth.release()
 
         rw = max(8, int(self.w * self.render_scale))
         rh = max(8, int(self.h * self.render_scale))
@@ -543,7 +713,9 @@ class GLRenderer:
 
         self._accum_tex = self.ctx.texture((rw, rh), 4, dtype="f2")
         self._accum_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
-        self._accum = self.ctx.framebuffer(color_attachments=[self._accum_tex])
+        self._accum_depth = self.ctx.depth_renderbuffer((rw, rh))
+        self._accum = self.ctx.framebuffer(color_attachments=[self._accum_tex],
+                                           depth_attachment=self._accum_depth)
         self._accum.use()
         self.ctx.clear(*self.bg, 1.0)
 
@@ -611,9 +783,12 @@ class GLRenderer:
         mvp = self._proj @ self._view @ model
         # GL expects column-major → transpose the row-major numpy matrix
         mvp_bytes = mvp.T.astype("f4").tobytes()
+        model_bytes = model.T.astype("f4").tobytes()
         self.point_prog["u_mvp"].write(mvp_bytes)
-        if self.gpu_prog is not None:
-            self.gpu_prog["u_mvp"].write(mvp_bytes)
+        for prog in self._model_progs:
+            prog["u_mvp"].write(mvp_bytes)
+            if "u_model" in prog._members:
+                prog["u_model"].write(model_bytes)
 
     def set_post_params(self, brightness=1.0, gain=(1.0, 1.0, 1.0), contrast=1.0,
                         invert=0.0, grain=0.0, time=0.0,
@@ -660,25 +835,37 @@ class GLRenderer:
                           con_fg=1.0, con_bg=1.0, neg_fg=0.0, neg_bg=0.0):
         """Per-scope color grading for the GPU path (subject vs background).
         Pass neutral values for sliders that target the whole frame."""
-        if self.gpu_prog is None:
-            return
-        for name, val in (("u_tint_fg", tuple(float(v) for v in tint_fg)),
-                          ("u_tint_bg", tuple(float(v) for v in tint_bg)),
-                          ("u_con_fg", float(con_fg)), ("u_con_bg", float(con_bg)),
-                          ("u_neg_fg", float(neg_fg)), ("u_neg_bg", float(neg_bg))):
-            if name in self.gpu_prog._members:
-                self.gpu_prog[name].value = val
+        vals = (("u_tint_fg", tuple(float(v) for v in tint_fg)),
+                ("u_tint_bg", tuple(float(v) for v in tint_bg)),
+                ("u_con_fg", float(con_fg)), ("u_con_bg", float(con_bg)),
+                ("u_neg_fg", float(neg_fg)), ("u_neg_bg", float(neg_bg)))
+        for prog in self._model_progs:
+            for name, val in vals:
+                if name in prog._members:
+                    prog[name].value = val
 
     def set_scoped_fx(self, size_fg=1.0, size_bg=1.0, bright_fg=1.0,
                       bright_bg=1.0, turb_fg=1.0, turb_bg=1.0):
         """Routed Physique effects targeted at the subject / background only."""
-        if self.gpu_prog is None:
-            return
-        for name, val in (("u_szm_fg", size_fg), ("u_szm_bg", size_bg),
-                          ("u_brm_fg", bright_fg), ("u_brm_bg", bright_bg),
-                          ("u_tbm_fg", turb_fg), ("u_tbm_bg", turb_bg)):
-            if name in self.gpu_prog._members:
-                self.gpu_prog[name].value = float(val)
+        vals = (("u_szm_fg", size_fg), ("u_szm_bg", size_bg),
+                ("u_brm_fg", bright_fg), ("u_brm_bg", bright_bg),
+                ("u_tbm_fg", turb_fg), ("u_tbm_bg", turb_bg))
+        for prog in self._model_progs:
+            for name, val in vals:
+                if name in prog._members:
+                    prog[name].value = float(val)
+
+    def set_model_look(self, matcap=0, rim=1.0, rim_hue=0.52, orig=0.5,
+                       transparent=False):
+        """T19: surface look of the 3D model (matcap, fresnel rim, colors)."""
+        rim_color = colorsys.hsv_to_rgb(rim_hue % 1.0, 0.65, 1.0)
+        for prog in self._model_progs:
+            for name, val in (("u_rim", float(rim)), ("u_rim_color", rim_color),
+                              ("u_orig", float(orig))):
+                if name in prog._members:
+                    prog[name].value = val
+        self._matcap_idx = int(matcap) % max(len(self._matcaps), 1)
+        self._mesh_transparent = bool(transparent)
 
     def set_size_mult(self, mult: float):
         """Global particle size multiplier (control-panel 'Taille points').
@@ -720,18 +907,112 @@ class GLRenderer:
             return
         prog = self.gpu_prog
         prog["u_mode"].value = self._gpu_mode
-        for name in ("u_time", "u_angle", "u_turb", "u_hide_bg", "u_bass",
-                     "u_low_mid", "u_mid", "u_rms", "u_centroid",
-                     "u_hz10", "u_hz11", "u_hz12", "u_depth", "u_edge"):
-            # unused uniforms get optimized out of the compiled program
-            if name in prog._members:
-                prog[name].value = float(uniforms[name])
-        prog["u_spectrum"].write(
-            np.ascontiguousarray(uniforms["u_spectrum"], dtype="f4").tobytes())
+        self._write_frame_uniforms(prog, uniforms, (
+            "u_time", "u_angle", "u_turb", "u_hide_bg", "u_bass",
+            "u_low_mid", "u_mid", "u_rms", "u_centroid",
+            "u_hz10", "u_hz11", "u_hz12", "u_depth", "u_edge", "u_inflate",
+            "u_mturb", "u_model_gain"))
         self._accum.use()
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = (moderngl.ONE, moderngl.ONE)   # additive
         self._gpu_vao.render(mode=moderngl.POINTS, vertices=self._gpu_count)
+
+    @staticmethod
+    def _write_frame_uniforms(prog, uniforms: dict, names):
+        for name in names:
+            # unused uniforms get optimized out of the compiled program
+            if name in prog._members:
+                prog[name].value = float(uniforms[name])
+        if "u_spectrum" in prog._members:
+            prog["u_spectrum"].write(
+                np.ascontiguousarray(uniforms["u_spectrum"], dtype="f4").tobytes())
+
+    # ------------------------------------------------------------------
+    # T19: 3D model surface / wireframe
+
+    @property
+    def has_mesh(self) -> bool:
+        return self._mesh_vaos is not None
+
+    def upload_mesh(self, m):
+        """Upload the model's welded mesh (or free it when m is None)."""
+        for obj in self._mesh_objs:
+            obj.release()
+        self._mesh_objs, self._mesh_vaos, self._mesh_counts = [], None, {}
+        if m is None or self.mesh_prog is None or len(m["tris"]) == 0:
+            return
+        ctx = self.ctx
+        vbo = ctx.buffer(np.ascontiguousarray(m["verts"], dtype="f4").tobytes())
+        self._mesh_objs.append(vbo)
+        layout = [(vbo, "3f 3f 3f 1f", "in_pos", "in_normal", "in_color", "in_band")]
+        vaos = {}
+        for key, prog, idx in (("surf", self.mesh_prog, m["tris"]),
+                               ("edges", self.wire_prog, m["edges"]),
+                               ("sharp", self.wire_prog, m["sharp"])):
+            if len(idx) == 0:
+                continue
+            ibo = ctx.buffer(np.ascontiguousarray(idx, dtype="u4").tobytes())
+            vao = ctx.vertex_array(prog, layout, index_buffer=ibo,
+                                   index_element_size=4)
+            self._mesh_objs += [ibo, vao]
+            vaos[key] = vao
+            self._mesh_counts[key] = idx.size
+        self._mesh_vaos = vaos
+        self.wire_prog["u_wire_gain"].value = m["wire_gain"]
+
+    def draw_model_mesh(self, uniforms: dict, style: int, sharp_only=False,
+                        hide_hidden=False):
+        """style 1 = surface (matcap + rim), 2 = wireframe."""
+        if not self.has_mesh:
+            return
+        names = ("u_time", "u_inflate", "u_mturb")
+        for prog in (self.mesh_prog, self.wire_prog):
+            self._write_frame_uniforms(prog, uniforms, names)
+        ctx, fbo, vaos = self.ctx, self._accum, self._mesh_vaos
+        fbo.use()
+        # clear depth only: the color buffer holds the trails
+        fbo.color_mask = (False, False, False, False)
+        fbo.clear(depth=1.0)
+        fbo.color_mask = (True, True, True, True)
+        fbo.use()     # re-applies the color mask to the GL state
+        self._matcaps[self._matcap_idx].use(0)
+        self.mesh_prog["u_matcap"].value = 0
+        self.mesh_prog["u_depth_bias"].value = 0.0
+
+        if style == 1:
+            if self._mesh_transparent:
+                ctx.disable(moderngl.DEPTH_TEST)
+                ctx.enable(moderngl.BLEND)
+                ctx.blend_func = (moderngl.ONE, moderngl.ONE)
+                self.mesh_prog["u_alpha"].value = 0.3
+            else:
+                ctx.enable(moderngl.DEPTH_TEST)
+                ctx.disable(moderngl.BLEND)
+                self.mesh_prog["u_alpha"].value = 1.0
+            vaos["surf"].render(moderngl.TRIANGLES,
+                                vertices=self._mesh_counts["surf"])
+        else:
+            if hide_hidden:
+                # depth-only pre-pass of the surface, pushed slightly back so
+                # the visible edges (same depth) pass the test
+                fbo.color_mask = (False, False, False, False)
+                fbo.use()
+                ctx.enable(moderngl.DEPTH_TEST)
+                ctx.disable(moderngl.BLEND)
+                self.mesh_prog["u_depth_bias"].value = 0.002
+                vaos["surf"].render(moderngl.TRIANGLES,
+                                    vertices=self._mesh_counts["surf"])
+                self.mesh_prog["u_depth_bias"].value = 0.0
+                fbo.color_mask = (True, True, True, True)
+                fbo.use()
+            else:
+                ctx.disable(moderngl.DEPTH_TEST)
+            ctx.enable(moderngl.BLEND)
+            ctx.blend_func = (moderngl.ONE, moderngl.ONE)   # glowing lines
+            # smooth meshes (sphere…) have no sharp edge: fall back to all
+            key = "sharp" if sharp_only and "sharp" in vaos else "edges"
+            vaos[key].render(moderngl.LINES, vertices=self._mesh_counts[key])
+        ctx.disable(moderngl.DEPTH_TEST)
 
     def begin_frame(self):
         """Fade the accumulation buffer toward the background (trail decay)."""

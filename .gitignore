@@ -17,3 +17,24 @@ CLAUDE.md
 
 # Scripts de lancement perso
 run.sh
+
+# macOS
+.DS_Store
+
+# Modèles 3D perso et dossier d'entrées de test
+inputs/
+*.glb
+*.gltf
+*.obj
+*.stl
+*.ply
+
+# Captures vidéo (T5)
+captures/
+
+# Config locale Claude Code
+.claude/
+
+# Caches Python / outils
+*.egg-info/
+.pytest_cache/

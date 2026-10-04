@@ -1,17 +1,22 @@
 """
 Graphic Art — GPU Audio Visualizer
-Usage: python main.py <audio_file> [--image photo.png] [--particles N]
+Usage: python main.py [audio_file] [--visual FILE] [--particles N]
 
-Modes:
-  default        → generative spectrum field (particles encode the FFT)
-  --image FILE   → particles converge onto the image, react to the music
+Visual source (picked from the file extension, also via drag & drop / panel):
+  none                    → generative star (particles encode the FFT)
+  --visual photo.png      → image: particles on the picture, react to the music
+  --visual model.glb      → 3D model (.glb .gltf .obj .stl .ply): points,
+                            surface or wireframe (style chosen in the panel)
+  --visual primitive:torus  → built-in test shape (icosphere, torus, box)
+  (--image is kept as an alias of --visual)
 
-Keys: SPACE pause/resume  |  ESC quit  |  U unload image (back to generative)
+Keys: SPACE pause/resume  |  ESC quit  |  U back to the star
 """
 
 import argparse
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import pygame
 import moderngl
@@ -20,6 +25,7 @@ from audio.analyzer import AudioAnalyzer
 from audio.player import AudioPlayer
 from gfx.renderer import GLRenderer
 from gfx.controls import ControlPanel, EFFECTS, EQ_BANDS, SCOPABLE_EFFECTS
+from visuals import mesh as meshlib
 from visuals.particles import ParticleSystem
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -93,7 +99,8 @@ class Hud:
         line = (f"BPM {tempo:.0f}  |  RMS {features['rms']:.2f}  |  "
                 f"BASS {features['bass']:.2f}  |  {mode.upper()}  |  {n} pts")
         hint = ("SPACE pause   F fullscreen   molette zoom   ESC quit"
-                + ("   U back to star" if mode == "image" else "   drop an image"))
+                + ("   U back to star" if mode != "star"
+                   else "   drop an image or a 3D model"))
         if paused:
             line += "   [PAUSED]"
         key = (line, hint)
@@ -116,8 +123,9 @@ def main():
     parser = argparse.ArgumentParser(description="Graphic Art — GPU Audio Visualizer")
     parser.add_argument("audio", nargs="?", default=None,
                         help="Audio file (optional — sources can be picked in the panel)")
-    parser.add_argument("--image", metavar="FILE", default=None,
-                        help="Pre-load an image for the particle system")
+    parser.add_argument("--visual", "--image", dest="visual", metavar="FILE",
+                        default=None,
+                        help="Image or 3D model to load (or primitive:torus)")
     parser.add_argument("--particles", type=int, default=50000, metavar="N",
                         help="Number of particles in generative mode (default 50000)")
     args = parser.parse_args()
@@ -192,14 +200,46 @@ def main():
         source = LiveAnalyzer(device=device)
         pygame.display.set_caption("Graphic Art  ·  LIVE")
 
-    if args.image:
-        if os.path.isfile(args.image):
-            particles.load_image(args.image)
-        else:
-            print(f"[warning] Image not found: {args.image}")
-
     hud = Hud(WIDTH)
     panel = ControlPanel()   # second window with live sliders
+
+    # ── Visual source: star / image / 3D model, chosen by file extension ──
+    # Models are parsed in a worker thread so the animation keeps running.
+    model_loader = ThreadPoolExecutor(max_workers=1)
+    pending_model = None     # (path, Future) of the model being prepared
+
+    def load_visual(path):
+        nonlocal pending_model
+        ext = os.path.splitext(path)[1].lower()
+        is_primitive = path.startswith("primitive:")
+        if not is_primitive and not os.path.isfile(path):
+            print(f"[warning] File not found: {path}")
+            return
+        if ext in SUPPORTED_IMAGE_EXT:
+            pending_model = None         # a late model must not replace it
+            particles.load_image(path)
+        elif meshlib.is_model_path(path):
+            if renderer.gpu_prog is None:
+                print("[warning] 3D models need the GPU particle path")
+                return
+            print(f"  Loading model: {path} …")
+            up = int(panel.params["model_up"])
+            # the up axis travels with the job: if the panel changes it
+            # meanwhile, gpu_uniforms() sees the mismatch and rebuilds
+            pending_model = (path, up, model_loader.submit(
+                meshlib.prepare, path, up,
+                particles.model_radius, particles.max_image))
+        else:
+            print(f"[warning] Unsupported format: {ext or path} — images "
+                  f"{sorted(SUPPORTED_IMAGE_EXT)}, models {sorted(meshlib.MODEL_EXT)}")
+
+    def unload_visual():
+        nonlocal pending_model
+        pending_model = None
+        particles.unload(n_generative=args.particles)
+
+    if args.visual:
+        load_visual(args.visual)
 
     # ── Play ─────────────────────────────────────────────────────────────────
     if args.audio:
@@ -225,17 +265,21 @@ def main():
                     if source is not None:
                         source.toggle_pause()
                 elif event.key == pygame.K_u:
-                    particles.unload(n_generative=args.particles)
+                    unload_visual()
                 elif event.key == pygame.K_f:
                     pygame.display.toggle_fullscreen()
             elif event.type == pygame.MOUSEWHEEL:
                 wheel_zoom = max(0.2, min(4.0, wheel_zoom * (1.06 ** event.y)))
             elif event.type == pygame.DROPFILE:
-                ext = os.path.splitext(event.file)[1].lower()
-                if ext in SUPPORTED_IMAGE_EXT:
-                    particles.load_image(event.file)
-                else:
-                    print(f"[warning] Unsupported image format: {ext}")
+                load_visual(event.file)
+
+        if pending_model is not None and pending_model[2].done():
+            path, up, fut = pending_model
+            pending_model = None
+            try:
+                particles.set_model(fut.result(), up)
+            except Exception as e:
+                print(f"[error] model load failed ({path}): {e}")
 
         if source is not None and source.is_done:
             stop_source()    # file ended: keep the window open, go silent
@@ -251,10 +295,10 @@ def main():
                     if source is not None else SILENT_FEATURES)
         p = panel.poll()
         for name, payload in panel.pop_actions():
-            if name == "load_image" and payload:
-                particles.load_image(payload)
+            if name == "load_visual" and payload:
+                load_visual(payload)
             elif name == "unload_image":
-                particles.unload(n_generative=args.particles)
+                unload_visual()
             elif name == "load_audio" and payload:
                 start_file(payload)
             elif name == "start_live":
@@ -338,6 +382,7 @@ def main():
                 "bpm": float(features.get("bpm", 0.0) or hud_tempo),
                 "fps": clock.get_fps(),
                 "source": src_label,
+                "visual": particles.mode,   # greys out the unused Objet group
             })
 
         # ── scoped color sliders: full frame (composite), subject-only or
@@ -383,12 +428,19 @@ def main():
         p2 = dict(p)
         p2["turbulence"] = p["turbulence"] + fx["Turbulence"]
         p2["fx_rot"] = fx["Vitesse rotation"]
+        p2["inflate"] = p["inflate"] + fx["Gonflement"]
+        # 3D model: no motion unless Turbulence is routed in Physique; the
+        # Objet tab slider only scales that routed amount
+        p2["model_turb"] = p["turbulence"] * (fx["Turbulence"]
+                                              + fx_fg["Turbulence"])
         if renderer.gpu_prog is not None:
             # T1: stateless physics in the vertex shader — CPU only sends uniforms
             rp = particles.gpu_uniforms(features, p2,
                                         time_s=pygame.time.get_ticks() * 0.001)
             if particles.rev != gpu_rev:
                 renderer.upload_particle_static(*particles.build_static())
+                renderer.upload_mesh(particles.model_mesh
+                                     if particles.mode == "model" else None)
                 gpu_rev = particles.rev
             out, count = None, 0
         else:
@@ -417,7 +469,17 @@ def main():
             renderer.draw_grid()
         if p["show_axis"] >= 0.5:
             renderer.draw_axis()
-        if renderer.gpu_prog is not None:
+        model_style = int(p["model_style"])   # 0 points, 1 surface, 2 wireframe
+        if (particles.mode == "model" and model_style > 0
+                and renderer.has_mesh):
+            renderer.set_model_look(matcap=p["matcap"], rim=p["rim"],
+                                    rim_hue=p["rim_hue"], orig=p["orig_color"],
+                                    transparent=p["mesh_transparent"] >= 0.5)
+            renderer.draw_model_mesh(rp, model_style,
+                                     sharp_only=p["wire_sharp"] >= 0.5,
+                                     hide_hidden=p["wire_hidden"] >= 0.5)
+        elif renderer.gpu_prog is not None:
+            renderer.set_model_look(rim=p["rim"], rim_hue=p["rim_hue"])
             renderer.draw_particles_gpu(rp)
         else:
             renderer.draw_particles(out, count)
@@ -432,6 +494,7 @@ def main():
         clock.tick(FPS)
 
     stop_source()
+    model_loader.shutdown(wait=False, cancel_futures=True)
     panel.save_autosave()   # settings only — source and image are not saved
     panel.close()
     pygame.quit()

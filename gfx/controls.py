@@ -4,7 +4,7 @@ Control panel — a second window with live controls, organized in tabs.
 Tkinter must run in a process' main thread on macOS, so the panel lives in its
 own process (multiprocessing) and streams messages back through a Queue:
     ("param", key, float_value)   slider / checkbox change
-    ("action", name, payload)     e.g. ("action", "load_image", "/path/img.png")
+    ("action", name, payload)     e.g. ("action", "load_visual", "/path/img.png")
 The main loop polls `ControlPanel.poll()` once per frame.
 
 T8: a second queue goes the other way (main → panel) with small monitoring
@@ -16,6 +16,9 @@ import json
 import multiprocessing as mp
 import os
 import queue
+
+from gfx.matcaps import NAMES as MATCAP_NAMES
+from visuals.mesh import UP_AXES as MESH_UP_AXES
 
 # presets.json at the project root; "_autosave" is a reserved hidden entry,
 # "_window" stores the panel geometry (T7)
@@ -64,6 +67,18 @@ DEFAULTS = {
     "depth":       0.5,    # z range of the image points (0 = flat layer)
     "n_points":    1000.0, # particle budget in thousands (image mode)
     "edge_boost":  1.0,    # outline emphasis: 0 = off, 2 = very marked
+    # ── Modèle 3D (T19) ──
+    "model_style": 1.0,    # index in MODEL_STYLES (1 = Surface)
+    "model_up":    0.0,    # index in visuals.mesh.UP_AXES
+    "matcap":      0.0,    # index in gfx.matcaps.NAMES
+    "inflate":     0.0,    # constant inflation along the normals   0 .. 2
+                           # (0 = model untouched; animate via Physique)
+    "rim":         1.0,    # fresnel rim intensity                  0 .. 3
+    "rim_hue":     0.52,   # rim color hue                          0 .. 1
+    "orig_color":  0.5,    # 0 = pure matcap, 1 = model colors
+    "mesh_transparent": 0.0,   # surface drawn additive (hologram)
+    "wire_sharp":  0.0,    # wireframe: sharp edges only
+    "wire_hidden": 0.0,    # wireframe: hide the edges behind the surface
     # ── Rotation (fixed scene parameters — music only drives the spin) ──
     "rot_gain":     1.0,   # spin speed multiplier         0 .. 3
     "axis_tilt":    15.0,  # rotation axis tilt from vertical (deg)  0 .. 90
@@ -91,6 +106,7 @@ EFFECTS = [
     "Turbulence",
     "Luminosité",
     "Taille points",
+    "Gonflement",     # T19: 3D model inflation along the normals
 ]
 
 # Effects that can target the subject or the background only (per-particle);
@@ -175,15 +191,41 @@ VIDEO_GROUPS = [
 
 VIDEO_SLIDERS = [s[:5] for _, grp in VIDEO_GROUPS for s in grp]
 
-IMAGE_SLIDERS = [
+OBJECT_SLIDERS = [
     ("Turbulence", "turbulence", 0.0, 3.0, 0.05,
-     "Amplitude de la vague et du drift"),
+     "Image : amplitude de la vague et du drift\n"
+     "Modèle 3D : dose l'effet Turbulence routé\ndans Physique (aucun effet seul)"),
+    ("Nombre de points (milliers)", "n_points", 50.0, 1000.0, 25.0,
+     "Budget de particules (image, modèle en points)\n"
+     "— reconstruit ~0,5 s après le réglage"),
+]
+
+IMAGE_SLIDERS = [
     ("Épaisseur (relief)", "depth", 0.0, 2.0, 0.05,
      "Profondeur des points : 0 = couche plate,\n2 = relief marqué"),
-    ("Nombre de points (milliers)", "n_points", 50.0, 1000.0, 25.0,
-     "Budget de particules — reconstruit\nl'image ~0,5 s après le réglage"),
     ("Intensité contours", "edge_boost", 0.0, 2.0, 0.05,
      "Les points sur les bords détectés sont\nplus brillants et plus gros"),
+]
+
+MODEL_STYLES = ["Points", "Surface", "Wireframe"]
+
+MODEL_SLIDERS = [
+    ("Gonflement", "inflate", 0.0, 2.0, 0.05,
+     "Gonflement permanent le long des normales\n(0 = modèle intact). Pour l'animer sur\n"
+     "la musique : effet « Gonflement » dans Physique"),
+    ("Rim (contour lumineux)", "rim", 0.0, 3.0, 0.05,
+     "Liseré lumineux sur les bords (fresnel)"),
+    ("Teinte du rim", "rim_hue", 0.0, 1.0, 0.01, None),
+    ("Couleur d'origine", "orig_color", 0.0, 1.0, 0.05,
+     "Surface : 0 = matcap pur,\n1 = couleurs du modèle éclairées"),
+]
+
+IMPORT_TYPES = [
+    ("Images et modèles 3D",
+     "*.png *.jpg *.jpeg *.bmp *.webp *.gif *.glb *.gltf *.obj *.stl *.ply"),
+    ("Images", "*.png *.jpg *.jpeg *.bmp *.webp *.gif"),
+    ("Modèles 3D", "*.glb *.gltf *.obj *.stl *.ply"),
+    ("Tous les fichiers", "*.*"),
 ]
 
 ROTATION_SLIDERS = [
@@ -195,8 +237,6 @@ ROTATION_SLIDERS = [
     ("Vitesse rotation de l'axe (°/s)", "axis_spin_speed", -120.0, 120.0, 1.0,
      None),
 ]
-
-ROTATION_KEYS = [k for _, k, *_ in ROTATION_SLIDERS]
 
 ROTATION_PRESETS = {
     "Sur soi (0,0,0)": {"rot_gain": 1.0, "axis_tilt": 0,  "axis_azimuth": 0,
@@ -416,7 +456,14 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
             return self._q(self._var.get())
 
         def set(self, v):
+            # a greyed-out scale (inactive Objet group) must still accept
+            # preset / autosave values
+            disabled = self._scale.instate(["disabled"])
+            if disabled:
+                self._scale.state(["!disabled"])
             self._scale.set(float(v))
+            if disabled:
+                self._scale.state(["disabled"])
 
     def build_slider(parent, label, key, lo, hi, step, tip=None):
         """Return a (not yet packed) frame: label + live value + ttk.Scale.
@@ -474,6 +521,30 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
 
     combos = {}   # key → (Combobox, values list)
 
+    def add_combo(parent, label, key, options, tip=None):
+        row = ttk.Frame(parent)
+        row.pack(fill="x", padx=14, pady=(6, 0))
+        ttk.Label(row, text=label).pack(side="left")
+        c = ttk.Combobox(row, values=options, state="readonly", width=15,
+                         font=FONT_SM)
+        c.current(int(DEFAULTS[key]))
+        c.pack(side="right")
+        c.bind("<<ComboboxSelected>>",
+               lambda e: send(key, float(c.current())))
+        combos[key] = (c, options)
+        if tip:
+            Tooltip(c, tip)
+
+    def set_enabled(widget, on: bool):
+        """Grey out / re-enable every ttk widget inside a group."""
+        for w in widget.winfo_children():
+            if isinstance(w, ttk.Widget):
+                try:
+                    w.state(["!disabled"] if on else ["disabled"])
+                except tk.TclError:
+                    pass
+            set_enabled(w, on)
+
     def apply_values(values: dict):
         for key, val in values.items():
             if key in scales:
@@ -486,11 +557,19 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                 combo.current(int(val))
                 send(key, float(int(val)))
 
-    def reset():
-        apply_values(DEFAULTS)
+    # per-tab reset: each tab claims the controls built inside it, so its
+    # button only resets those (never the other tabs)
+    tab_keys = {}
 
-    def reset_rotation():
-        apply_values({k: DEFAULTS[k] for k in ROTATION_KEYS})
+    def claim_keys(tab):
+        taken = set().union(*tab_keys.values())
+        tab_keys[tab] = (set(scales) | set(checks) | set(combos)) - taken
+
+    def reset_button(parent, tab):
+        ttk.Button(parent, text="↺  Reset de cet onglet",
+                   command=lambda: apply_values(
+                       {k: DEFAULTS[k] for k in tab_keys.get(tab, ())})
+                   ).pack(fill="x", padx=10, pady=(12, 4))
 
     # ── Onglet Source ─────────────────────────────────────────────────
     tab_src = make_tab("Source")
@@ -548,8 +627,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
 
     # ── Onglet Vidéo ──────────────────────────────────────────────────
     tab_video = make_tab("Vidéo")
-    ttk.Button(tab_video, text="↺  Reset paramètres", command=reset
-               ).pack(fill="x", padx=10, pady=(12, 4))
+    reset_button(tab_video, "Vidéo")
     for group_title, group_sliders in VIDEO_GROUPS:
         grp = ttk.LabelFrame(tab_video, text=group_title)
         grp.pack(fill="x", padx=10, pady=(8, 2))
@@ -559,33 +637,77 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
         ttk.Frame(grp).pack(pady=2)   # bottom breathing room
 
     add_check(tab_video, "Grille du décor", "show_grid", pady=(8, 10))
+    claim_keys("Vidéo")
 
-    # ── Onglet Image ──────────────────────────────────────────────────
-    tab_image = make_tab("Image")
+    # ── Onglet Objet (image ou modèle 3D, T19) ────────────────────────
+    tab_obj = make_tab("Objet")
+    reset_button(tab_obj, "Objet")
 
-    def upload_image():
+    def import_visual():
         path = filedialog.askopenfilename(
-            title="Choisir une image",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.webp *.gif"),
-                       ("Tous les fichiers", "*.*")])
+            title="Importer une image ou un modèle 3D", filetypes=IMPORT_TYPES)
         if path:
-            q.put(("action", "load_image", path))
+            q.put(("action", "load_visual", path))
 
-    ttk.Button(tab_image, text="📁  Charger une image…", command=upload_image
-               ).pack(fill="x", padx=10, pady=(14, 6))
-    add_check(tab_image, "Supprimer le fond (sujet seul)", "hide_bg",
-              pady=(6, 2))
-    add_check(tab_image, "Mode courbes (art abstrait)", "curve_mode",
-              pady=(2, 2))
-    ttk.Button(tab_image, text="↩  Retour mode étoile",
+    ttk.Button(tab_obj, text="📁  Importer image / modèle 3D…",
+               command=import_visual).pack(fill="x", padx=10, pady=(14, 4))
+    ttk.Button(tab_obj, text="↩  Retour mode étoile",
                command=lambda: q.put(("action", "unload_image", None))
-               ).pack(fill="x", padx=10, pady=(6, 4))
-    add_sliders(tab_image, IMAGE_SLIDERS)
+               ).pack(fill="x", padx=10, pady=(2, 4))
+    prim_row = ttk.Frame(tab_obj)
+    prim_row.pack(fill="x", padx=10, pady=(2, 2))
+    ttk.Label(prim_row, text="Formes test :", style="Muted.TLabel"
+              ).pack(side="left")
+    for label, kind in (("Sphère", "icosphere"), ("Tore", "torus"),
+                        ("Cube", "box")):
+        ttk.Button(prim_row, text=label, width=6,
+                   command=lambda k=kind: q.put(
+                       ("action", "load_visual", f"primitive:{k}"))
+                   ).pack(side="left", padx=(4, 0))
+    add_sliders(tab_obj, OBJECT_SLIDERS)
+
+    grp_img = ttk.LabelFrame(tab_obj, text="Image")
+    grp_img.pack(fill="x", padx=10, pady=(10, 2))
+    add_check(grp_img, "Supprimer le fond (sujet seul)", "hide_bg",
+              pady=(6, 2))
+    add_check(grp_img, "Mode courbes (art abstrait)", "curve_mode",
+              pady=(2, 2))
+    add_sliders(grp_img, IMAGE_SLIDERS)
+    ttk.Frame(grp_img).pack(pady=2)
+
+    grp_model = ttk.LabelFrame(tab_obj, text="Modèle 3D")
+    grp_model.pack(fill="x", padx=10, pady=(10, 8))
+    add_combo(grp_model, "Style", "model_style", MODEL_STYLES,
+              "Points : nuage sur la surface\nSurface : objet plein éclairé\n"
+              "Wireframe : arêtes du maillage")
+    add_combo(grp_model, "Axe haut", "model_up", MESH_UP_AXES,
+              "Les STL et les scans sont souvent en Z-up")
+    add_combo(grp_model, "Matcap", "matcap", MATCAP_NAMES,
+              "Éclairage studio de la surface")
+    add_check(grp_model, "Surface transparente (hologramme)",
+              "mesh_transparent", pady=(8, 0))
+    add_check(grp_model, "Wireframe : arêtes vives seulement", "wire_sharp",
+              pady=(2, 0))
+    add_check(grp_model, "Wireframe : masquer les arêtes cachées",
+              "wire_hidden", pady=(2, 0))
+    add_sliders(grp_model, MODEL_SLIDERS)
+    ttk.Frame(grp_model).pack(pady=2)
+
+    visual_state = {"mode": None}
+
+    def show_visual_mode(mode):
+        if mode == visual_state["mode"]:
+            return
+        visual_state["mode"] = mode
+        set_enabled(grp_img, mode == "image")
+        set_enabled(grp_model, mode == "model")
+
+    show_visual_mode("star")
+    claim_keys("Objet")
 
     # ── Onglet Rotation ───────────────────────────────────────────────
     tab_rot = make_tab("Rotation")
-    ttk.Button(tab_rot, text="↺  Reset rotation", command=reset_rotation
-               ).pack(fill="x", padx=10, pady=(12, 4))
+    reset_button(tab_rot, "Rotation")
     ttk.Label(tab_rot,
               text="Axe et position fixes — la musique\n"
                    "ne pilote que la vitesse de rotation.",
@@ -606,9 +728,11 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                    ).grid(row=i // 2, column=i % 2, sticky="ew", padx=4, pady=3)
     grp_rotp.columnconfigure(0, weight=1)
     grp_rotp.columnconfigure(1, weight=1)
+    claim_keys("Rotation")
 
     # ── Onglet Physique (avec VU-mètres, T8) ──────────────────────────
     tab_phys = make_tab("Physique")
+    reset_button(tab_phys, "Physique")
     ttk.Label(tab_phys,
               text="Chaque bande de fréquence pilote\nl'effet de son choix.",
               style="Muted.TLabel", justify="left"
@@ -661,6 +785,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                    ).grid(row=i // 2, column=i % 2, sticky="ew", padx=4, pady=3)
     grp_physp.columnconfigure(0, weight=1)
     grp_physp.columnconfigure(1, weight=1)
+    claim_keys("Physique")
 
     # ── Monitoring main → panel (T8) : VU-mètres + barre de statut ─────
     vu_levels = [0.0] * len(EQ_BANDS)
@@ -688,6 +813,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                 f"{'BPM %.0f' % bpm if bpm > 0 else 'BPM --'} · "
                 f"RMS {blocks} · {pkt.get('fps', 0.0):.0f} fps · "
                 f"{pkt.get('source', '—')}"))
+            show_visual_mode(pkt.get("visual", "star"))
         root.after(66, poll_monitor)   # ~15 Hz
 
     poll_monitor()

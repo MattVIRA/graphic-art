@@ -7,3 +7,5 @@ rembg[cpu]>=2.0.76
 opencv-python>=4.8.0
 soundfile>=0.12.0
 sounddevice>=0.4.6
+trimesh>=4.0
+fast-simplification>=0.1

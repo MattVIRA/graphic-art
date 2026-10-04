@@ -14,6 +14,10 @@ IMAGE  : the picture stays recognizable. Pixels become particles kept at their
 STAR   : a rotating 3D "sea-urchin". n_mels spikes spread over a sphere
          (Fibonacci distribution); each spike's length is driven by its mel band.
 
+MODEL  : a 3D model file (T19, visuals/mesh.py). Points sampled on the real
+         surface (GPU only); the surface / wireframe styles are drawn by the
+         renderer's mesh programs from `model_mesh`.
+
 Frequency mapping (the chosen preset)
 -------------------------------------
   bass     20–250 Hz   → element SIZE (+ global zoom pulse)
@@ -64,6 +68,13 @@ class ParticleSystem:
         self.rot_speed = 0.004    # smoothed rotation speed (rad/frame)
         self._rembg_session = None
         self._jitter = None       # persistent smoothed jitter state (image mode)
+        # T19: 3D model source
+        self._model = None            # mesh.RawModel (cached parsed file)
+        self.model_points = None      # (N,11) static point buffer
+        self.model_mesh = None        # surface/wire buffers, None = point cloud
+        self.model_up = 0             # index in mesh.UP_AXES
+        # bounding-sphere radius on screen (room left for the HUD + inflation)
+        self.model_radius = 0.36 * height
 
         self._init_star(n_generative)
         self._out = np.zeros((max(self.n, max_image), 7), dtype=np.float32)
@@ -187,6 +198,33 @@ class ParticleSystem:
         if self.mode == "image" and self._src is not None:
             (self._build_curves if self.image_style == "curves"
              else self._build_points)()
+        elif self.mode == "model":
+            self._rebuild_model(points_only=True)
+
+    # ==================================================================
+    # MODEL mode (T19)
+    # ==================================================================
+
+    def set_model(self, prepared: tuple, up: int):
+        """Install a model prepared by mesh.prepare() in the worker thread."""
+        from visuals import mesh
+        self._model, self.model_points, self.model_mesh = prepared
+        self.model_up = up
+        self.n = len(self.model_points)
+        self.model_gain = mesh.point_gain(self._model, self.model_radius, self.n)
+        self.mode = "model"
+        self.rev += 1
+
+    def _rebuild_model(self, points_only: bool = False):
+        from visuals import mesh
+        self.model_points = mesh.build_points(self._model, self.model_up,
+                                              self.model_radius, self.max_image)
+        if not points_only:
+            self.model_mesh = mesh.build_mesh(self._model, self.model_up,
+                                              self.model_radius)
+        self.n = len(self.model_points)
+        self.model_gain = mesh.point_gain(self._model, self.model_radius, self.n)
+        self.rev += 1
 
     def _build_points(self):
         s = self._src
@@ -504,6 +542,8 @@ class ParticleSystem:
             out[:, 6] = getattr(self, "edge", np.zeros(n, dtype=np.float32))
             out[:, 10] = self.is_fg
             return out, 0, n
+        if self.mode == "model":
+            return self.model_points, 3, self.n
         # star
         n = self.n
         out = np.zeros((n, 11), dtype=np.float32)
@@ -526,12 +566,20 @@ class ParticleSystem:
             if self.mode == "image" and self._src is not None:
                 (self._build_curves if want_curves else self._build_points)()
 
+        want_up = int(params.get("model_up", 0.0)) if params else 0
+        if self.mode == "model" and want_up != self.model_up:
+            self.model_up = want_up
+            self._rebuild_model()
+
         target_speed = (0.0015 + f.get("transients", 0.0) * 0.035 + f["high"] * 0.008
                         + (params.get("fx_rot", 0.0) if params else 0.0) * 0.05)
         self.rot_speed += (target_speed - self.rot_speed) * 0.04
         self.angle += self.rot_speed * rot_gain
 
         return {
+            "u_inflate": params.get("inflate", 0.0) if params else 0.0,
+            "u_mturb": params.get("model_turb", 0.0) if params else 0.0,
+            "u_model_gain": getattr(self, "model_gain", 1.0),
             "u_time": time_s,
             "u_angle": self.angle,
             "u_turb": turb_gain,
@@ -544,7 +592,9 @@ class ParticleSystem:
             "u_edge": params.get("edge_boost", 1.0) if params else 1.0,
             "u_spectrum": f["spectrum"],
             "angle": self.angle,
-            "scale": 1.0 + f["bass"] * 0.12,
+            # a model keeps its exact shape: no built-in bass pulse (the
+            # routed "Zoom (pulse)" effect still applies)
+            "scale": 1.0 if self.mode == "model" else 1.0 + f["bass"] * 0.12,
         }
 
     def update(self, f, params=None) -> tuple:
