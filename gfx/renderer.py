@@ -1,15 +1,18 @@
 """
 GPU renderer (moderngl).
 
-Pipeline per frame:
-  1. Fade the accumulation buffer toward the background color  → motion trails
-  2. Draw particles as additive soft glowing points into accum (HDR float buffer)
-  3. Bloom: downsample + separable Gaussian blur of accum
-  4. Composite accum + bloom to the screen with tone mapping
+Pipeline per frame (all HDR, linear light):
+  1. Scene: geometry (surface, lines, grid) into a 4× MSAA buffer, resolved;
+     soft additive points drawn after the resolve (they don't need MSAA)
+  2. Trails: scene merged into a persistent layer (max of decayed past and
+     present; opaque surfaces win) → motion trails without ghosting
+  3. Bloom: thresholded 13-tap downsample chain + tent upsample (6 levels)
+  4. Composite: AgX filmic tone map, background, grading, vignette, dither
   5. (optional) HUD text overlay quad
 
-pygame owns the window + GL context; we attach moderngl to it via
-moderngl.create_context().
+GLFW owns the window + GL context (main.py); we attach moderngl to it via
+moderngl.create_context(). Every size-dependent buffer is allocated at the
+framebuffer resolution (logical size × pixel ratio → native Retina).
 """
 
 import colorsys
@@ -77,6 +80,8 @@ def _rotate_axis(axis, a):
 
 # ── Shaders ───────────────────────────────────────────────────────────────────
 
+EMISSION_GAIN = 3.0   # additive passes (points, lines) — see GLRenderer.__init__
+
 POINT_VS = """
 #version 330
 uniform mat4 u_mvp;
@@ -94,16 +99,28 @@ void main() {
 }
 """
 
+# Scene colors are computed in display (sRGB-like) space, as the sliders and
+# matcaps were designed, then converted to LINEAR light at the output of every
+# geometry shader: additive blending, bloom and the filmic tone map all work on
+# linear values. Alpha carries opacity, not glow: emissive passes (points,
+# lines) write 0, the opaque surface writes 1 (it hides the trails and the
+# background behind it).
+_LINEAR_GLSL = """
+vec3 to_linear(vec3 c) { return pow(max(c, vec3(0.0)), vec3(2.2)); }
+"""
+
 POINT_FS = """
 #version 330
+uniform float u_emit;   // emission gain of the additive passes
 in vec3 v_color;
 out vec4 f_color;
+""" + _LINEAR_GLSL + """
 void main() {
     // soft round falloff (gaussian-ish) → glowing dot
     vec2 c = gl_PointCoord - vec2(0.5);
     float d2 = dot(c, c);
     float a = exp(-d2 * 14.0);
-    f_color = vec4(v_color * a, a);   // premultiplied; drawn with additive blend
+    f_color = vec4(to_linear(v_color) * a * u_emit, 0.0);   // additive emission
 }
 """
 
@@ -314,7 +331,15 @@ void main() {
 
     vec4 clip = u_mvp * vec4(pos, 1.0);
     gl_Position = clip;
-    gl_PointSize = max(1.0, size * u_size_mult * u_size_scale / max(clip.w, 0.001));
+    // sub-pixel points flicker as they cross pixel centers: clamp the sprite
+    // to a minimum footprint and dim it to keep the same energy
+    float ps = size * u_size_mult * u_size_scale / max(clip.w, 0.001);
+    const float MIN_PS = 1.5;
+    if (ps < MIN_PS) {
+        col *= (ps * ps) / (MIN_PS * MIN_PS);
+        ps = MIN_PS;
+    }
+    gl_PointSize = ps;
     v_color = col;
 }
 """)
@@ -381,7 +406,7 @@ in vec3  v_normal;
 in vec3  v_color;
 in vec2  v_uv;
 out vec4 f_color;
-""" + _MESH_GRADE_GLSL + """
+""" + _MESH_GRADE_GLSL + _LINEAR_GLSL + """
 void main() {
     vec3 n = normalize(v_normal);
     if (!gl_FrontFacing) n = -n;          // open meshes: light the inside too
@@ -391,7 +416,8 @@ void main() {
     vec3 col = mix(mc, base * lum * 1.6, u_orig) * 1.1;
     float fres = pow(1.0 - max(n.z, 0.0), 3.0);
     col += u_rim_color * fres * u_rim;
-    f_color = vec4(grade(col) * u_alpha, 1.0);
+    // opaque: alpha 1 occludes trails + background; transparent: emission
+    f_color = vec4(to_linear(grade(col)) * u_alpha, u_alpha >= 0.999 ? 1.0 : 0.0);
 }
 """
 
@@ -400,15 +426,16 @@ WIRE_FS = """
 uniform float u_rim;
 uniform vec3  u_rim_color;
 uniform float u_wire_gain;    // per-model: dense meshes are dimmed
+uniform float u_emit;
 in vec3  v_normal;
 in vec3  v_color;
 out vec4 f_color;
-""" + _MESH_GRADE_GLSL + """
+""" + _MESH_GRADE_GLSL + _LINEAR_GLSL + """
 void main() {
     float facing = abs(normalize(v_normal).z);
     vec3 col = v_color * (0.45 + 0.55 * facing);
     col += u_rim_color * pow(1.0 - facing, 2.0) * u_rim * 0.5;
-    f_color = vec4(grade(col) * u_wire_gain, 1.0);
+    f_color = vec4(to_linear(grade(col)) * u_wire_gain * u_emit, 0.0);
 }
 """
 
@@ -423,47 +450,112 @@ void main() {
 }
 """
 
-FADE_FS = """
+# Trails: the frame's scene is merged into the persistent trail layer. Light
+# keeps the brightest of (decayed past, present) so moving glow leaves a tail;
+# where the present frame is opaque (model surface) it wins outright, so a
+# rotating surface never ghosts over itself.
+TRAIL_FS = """
 #version 330
-uniform vec3 u_bg;
-uniform float u_fade;   // 0..1, fraction pulled toward bg each frame
-out vec4 f_color;
-void main() {
-    f_color = vec4(u_bg, u_fade);   // normal alpha blend → accum*(1-f) + bg*f
-}
-"""
-
-BLUR_FS = """
-#version 330
-uniform sampler2D u_tex;
-uniform vec2 u_dir;     // (1/w, 0) or (0, 1/h)
+uniform sampler2D u_scene;
+uniform sampler2D u_trail;
+uniform float u_decay;   // 1 - fade
 in vec2 v_uv;
 out vec4 f_color;
 void main() {
-    float w[5] = float[](0.227027, 0.194595, 0.121622, 0.054054, 0.016216);
-    vec3 acc = texture(u_tex, v_uv).rgb * w[0];
-    for (int i = 1; i < 5; i++) {
-        acc += texture(u_tex, v_uv + u_dir * float(i)).rgb * w[i];
-        acc += texture(u_tex, v_uv - u_dir * float(i)).rgb * w[i];
-    }
-    f_color = vec4(acc, 1.0);
+    vec4 s = texture(u_scene, v_uv);
+    vec4 t = texture(u_trail, v_uv) * u_decay;
+    vec3 c = mix(max(t.rgb, s.rgb), s.rgb, s.a);
+    f_color = vec4(c, max(t.a, s.a));
 }
 """
 
+# Bloom (Jimenez, "Next generation post processing in Call of Duty: AW"):
+# 13-tap downsample chain with a soft-knee threshold + Karis average on the
+# first level (only highlights glow, no fireflies), then a tent-filter
+# upsample chain that blends each level with the next (u_scatter = radius).
+BLOOM_DOWN_FS = """
+#version 330
+uniform sampler2D u_tex;
+uniform vec2  u_texel;        // source texel size
+uniform int   u_prefilter;    // 1 on the first level
+uniform float u_threshold;
+uniform float u_knee;
+in vec2 v_uv;
+out vec4 f_color;
+vec3 S(float x, float y) { return texture(u_tex, v_uv + vec2(x, y) * u_texel).rgb; }
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+vec3 karis(vec3 a, vec3 b, vec3 c, vec3 d, out float w) {
+    vec3 m = (a + b + c + d) * 0.25;
+    w = 1.0 / (1.0 + luma(m));
+    return m * w;
+}
+void main() {
+    vec3 a = S(-2.0,  2.0), b = S(0.0,  2.0), c = S(2.0,  2.0);
+    vec3 d = S(-2.0,  0.0), e = S(0.0,  0.0), f = S(2.0,  0.0);
+    vec3 g = S(-2.0, -2.0), h = S(0.0, -2.0), i = S(2.0, -2.0);
+    vec3 j = S(-1.0,  1.0), k = S(1.0,  1.0);
+    vec3 l = S(-1.0, -1.0), m = S(1.0, -1.0);
+    vec3 col;
+    if (u_prefilter == 1) {
+        float w0, w1, w2, w3, w4;
+        vec3 s = karis(j, k, l, m, w0) * 0.5
+               + (karis(a, b, d, e, w1) + karis(b, c, e, f, w2)
+                + karis(d, e, g, h, w3) + karis(e, f, h, i, w4)) * 0.125;
+        col = s / (w0 * 0.5 + (w1 + w2 + w3 + w4) * 0.125);
+        // soft-knee threshold on the brightest channel
+        float br = max(max(col.r, col.g), col.b);
+        float rq = clamp(br - u_threshold + u_knee, 0.0, 2.0 * u_knee);
+        rq = rq * rq / (4.0 * u_knee + 1e-5);
+        col *= max(rq, br - u_threshold) / max(br, 1e-5);
+    } else {
+        col = e * 0.125 + (a + c + g + i) * 0.03125
+            + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125;
+    }
+    f_color = vec4(max(col, vec3(0.0)), 1.0);
+}
+"""
+
+BLOOM_UP_FS = """
+#version 330
+uniform sampler2D u_low;      // next (smaller) level, already upsampled
+uniform sampler2D u_cur;      // this level's downsample
+uniform vec2  u_texel;        // u_low texel size
+uniform float u_scatter;      // 0 = tight glow … 1 = wide halos
+in vec2 v_uv;
+out vec4 f_color;
+void main() {
+    vec2 t = u_texel;
+    vec3 up = texture(u_low, v_uv).rgb * 4.0
+        + (texture(u_low, v_uv + vec2(-t.x, 0.0)).rgb
+         + texture(u_low, v_uv + vec2( t.x, 0.0)).rgb
+         + texture(u_low, v_uv + vec2(0.0, -t.y)).rgb
+         + texture(u_low, v_uv + vec2(0.0,  t.y)).rgb) * 2.0
+        + texture(u_low, v_uv + vec2(-t.x, -t.y)).rgb
+        + texture(u_low, v_uv + vec2( t.x, -t.y)).rgb
+        + texture(u_low, v_uv + vec2(-t.x,  t.y)).rgb
+        + texture(u_low, v_uv + vec2( t.x,  t.y)).rgb;
+    f_color = vec4(mix(texture(u_cur, v_uv).rgb, up / 16.0, u_scatter), 1.0);
+}
+"""
+
+# AgX (Troy Sobotka; fit by B. Wrensch) with the "punchy" look: filmic
+# highlight roll-off that keeps saturated neons from clipping to flat white
+# and gives deep blacks, unlike the old Reinhard curve.
 COMPOSITE_FS = """
 #version 330
-uniform sampler2D u_scene;
-uniform sampler2D u_bloom0;   // 1/2 res — tight glow
-uniform sampler2D u_bloom1;   // 1/4 res — medium halo
-uniform sampler2D u_bloom2;   // 1/8 res — wide soft halo
+uniform sampler2D u_scene;    // trail layer (linear HDR, alpha = opacity)
+uniform sampler2D u_bloom;
 uniform float u_bloom_intensity;
-uniform float u_bloom_radius;   // 0 = tight, 1 = wide halos
-uniform float u_brightness;   // pre-tonemap exposure
+uniform float u_brightness;   // exposure (linear multiplier)
+uniform vec3  u_bg;           // background color (display space)
 uniform vec3  u_gain;         // per-channel RGB gain
 uniform float u_contrast;     // post contrast around 0.5
 uniform float u_invert;       // 0 = normal, 1 = negative
 uniform float u_grain;        // film grain amount
+uniform float u_vignette;     // 0 = off
 uniform float u_time;         // seed for the grain noise
+uniform float u_ss;           // supersampling factor of u_scene
+uniform vec2  u_out_texel;    // 1 / output size
 uniform vec2 u_shift_r;       // per-channel uv offsets (chromatic shift)
 uniform vec2 u_shift_g;
 uniform vec2 u_shift_b;
@@ -474,28 +566,66 @@ float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
+vec4 scene_at(vec2 uv) {
+    if (u_ss < 1.01) return texture(u_scene, uv);
+    // supersampled scene: 2×2 bilinear taps = box filter over the footprint
+    vec2 o = u_out_texel * 0.25;
+    return 0.25 * (texture(u_scene, uv + vec2(-o.x, -o.y)) +
+                   texture(u_scene, uv + vec2( o.x, -o.y)) +
+                   texture(u_scene, uv + vec2(-o.x,  o.y)) +
+                   texture(u_scene, uv + vec2( o.x,  o.y)));
+}
+
+vec3 agx_contrast(vec3 x) {
+    vec3 x2 = x * x, x4 = x2 * x2;
+    return 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4
+         - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+}
+
+vec3 agx(vec3 v) {
+    const mat3 m_in = mat3(0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+                           0.0784335999999992, 0.878468636469772, 0.0784336,
+                           0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+    const mat3 m_out = mat3(1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+                            -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+                            -0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+    const float lo = -12.47393, hi = 4.026069;
+    v = m_in * max(v, vec3(1e-10));
+    v = (clamp(log2(v), lo, hi) - lo) / (hi - lo);
+    v = agx_contrast(v);
+    // "punchy" look: a bit more power + saturation
+    v = pow(max(v, vec3(0.0)), vec3(1.35));
+    float l = dot(v, vec3(0.2126, 0.7152, 0.0722));
+    v = l + 1.4 * (v - l);
+    return clamp(m_out * v, 0.0, 1.0);   // display-encoded
+}
+
 void main() {
-    vec3 scene = vec3(texture(u_scene, v_uv + u_shift_r).r,
-                      texture(u_scene, v_uv + u_shift_g).g,
-                      texture(u_scene, v_uv + u_shift_b).b);
-    // multi-scale bloom: blend the 3 blur levels; the radius shifts the
-    // energy toward the wider levels (normalized so intensity stays stable)
-    float w0 = 1.0 - u_bloom_radius * 0.5;
-    float w1 = u_bloom_radius * 0.9;
-    float w2 = u_bloom_radius * u_bloom_radius * 1.4;
-    vec3 bloom = texture(u_bloom0, v_uv).rgb * w0 +
-                 texture(u_bloom1, v_uv).rgb * w1 +
-                 texture(u_bloom2, v_uv).rgb * w2;
-    vec3 hdr = (scene + bloom * u_bloom_intensity) * u_brightness;
-    vec3 mapped = hdr / (hdr + vec3(1.0));   // Reinhard tone map
-    mapped *= u_gain;
-    mapped = (mapped - 0.5) * u_contrast + 0.5;
-    mapped = mix(mapped, vec3(1.0) - mapped, u_invert);
+    vec4 c = scene_at(v_uv);
+    vec3 hdr = c.rgb;
+    if (any(notEqual(vec4(u_shift_r, u_shift_g), vec4(0.0)))
+            || any(notEqual(u_shift_b, vec2(0.0))))
+        hdr = vec3(scene_at(v_uv + u_shift_r).r,
+                   scene_at(v_uv + u_shift_g).g,
+                   scene_at(v_uv + u_shift_b).b);
+    hdr += texture(u_bloom, v_uv).rgb * u_bloom_intensity;
+    vec3 col = agx(hdr * u_brightness);
+    col += u_bg * (1.0 - clamp(c.a, 0.0, 1.0));
+    col *= u_gain;
+    col = (col - 0.5) * u_contrast + 0.5;
+    col = mix(col, vec3(1.0) - col, u_invert);
+    if (u_vignette > 0.001) {
+        vec2 q = (v_uv - 0.5) * vec2(u_out_texel.y / u_out_texel.x, 1.0);
+        col *= mix(1.0, smoothstep(1.15, 0.25, length(q)), u_vignette);
+    }
     if (u_grain > 0.001) {
         float n = hash(v_uv * 971.0 + vec2(u_time, u_time * 1.7));
-        mapped += (n - 0.5) * u_grain;
+        col += (n - 0.5) * u_grain;
     }
-    f_color = vec4(clamp(mapped, 0.0, 1.0), 1.0);
+    // triangular dither ±1 LSB: no banding in the dark gradients / halos
+    vec2 px = gl_FragCoord.xy;
+    col += (hash(px + fract(u_time) * 61.0) + hash(px * 1.37 + 17.0) - 1.0) / 255.0;
+    f_color = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
 """
 
@@ -510,7 +640,7 @@ LINE_FS = """
 #version 330
 uniform vec3 u_color;
 out vec4 f_color;
-void main() { f_color = vec4(u_color, 1.0); }
+void main() { f_color = vec4(pow(u_color, vec3(2.2)) * 3.0, 0.0); }
 """
 
 GRID_VS = """
@@ -532,7 +662,7 @@ out vec4 f_color;
 void main() {
     // fade the grid out toward the horizon
     float fade = 1.0 - smoothstep(700.0, 2100.0, v_dist);
-    f_color = vec4(u_color * fade, fade);
+    f_color = vec4(pow(u_color, vec3(2.2)) * fade * 3.0, 0.0);
 }
 """
 
@@ -578,9 +708,12 @@ class GLRenderer:
 
         # ── Programs ──
         self.point_prog = ctx.program(vertex_shader=POINT_VS, fragment_shader=POINT_FS)
-        self.fade_prog = ctx.program(vertex_shader=FULLSCREEN_VS, fragment_shader=FADE_FS)
-        self.blur_prog = ctx.program(vertex_shader=FULLSCREEN_VS, fragment_shader=BLUR_FS)
+        self.trail_prog = ctx.program(vertex_shader=FULLSCREEN_VS, fragment_shader=TRAIL_FS)
+        self.down_prog = ctx.program(vertex_shader=FULLSCREEN_VS,
+                                     fragment_shader=BLOOM_DOWN_FS)
+        self.up_prog = ctx.program(vertex_shader=FULLSCREEN_VS, fragment_shader=BLOOM_UP_FS)
         self.comp_prog = ctx.program(vertex_shader=FULLSCREEN_VS, fragment_shader=COMPOSITE_FS)
+        self._fs_vaos = {}           # one empty VAO per fullscreen program
         self.overlay_prog = ctx.program(vertex_shader=OVERLAY_VS, fragment_shader=OVERLAY_FS)
         self.grid_prog = ctx.program(vertex_shader=GRID_VS, fragment_shader=GRID_FS)
         self.line_prog = ctx.program(vertex_shader=LINE_VS, fragment_shader=LINE_FS)
@@ -621,7 +754,12 @@ class GLRenderer:
         self._matcap_idx = 0
         self._mesh_transparent = False
 
-        self.fade_prog["u_bg"].value = self.bg
+        # additive passes used to pile up over ~1/fade frames in the old
+        # accumulation buffer; the trail layer keeps the max instead, so the
+        # emission gain restores the brightness the presets were tuned for
+        for prog in (self.point_prog, self.gpu_prog, self.wire_prog):
+            if prog is not None and "u_emit" in prog._members:
+                prog["u_emit"].value = EMISSION_GAIN
         self.set_post_params()  # initialize composite uniforms to neutral
         self.set_scoped_colors()   # GL uniforms default to 0 → set neutral
         self.set_scoped_fx()
@@ -637,9 +775,6 @@ class GLRenderer:
         self.point_prog["u_size_scale"].value = float(self.cam_dist)
         self.set_transform(0.0)
 
-        # Empty VAO for fullscreen passes (3 verts from gl_VertexID)
-        self._fs_vao = ctx.vertex_array(self.fade_prog, [])
-
         # ── Particle VBO / VAO ──
         self._vbo = ctx.buffer(reserve=max_particles * self.FLOATS_PER_PARTICLE * 4)
         # T1: lazily-sized static buffer for the GPU-physics path
@@ -653,17 +788,19 @@ class GLRenderer:
         )
 
         # ── Framebuffers ──
-        # T6: internal supersampling — the scene is rendered at render_scale ×
-        # the window size then downsampled at composite time (kills aliasing on
-        # thin curves/points; pygame cannot request a native Retina GL drawable)
-        self.render_scale = 1.5
+        # The scene is drawn each frame into a multisampled HDR buffer (MSAA
+        # 4×: clean triangle edges and lines), resolved, then merged into the
+        # persistent trail layer. Sizes = logical size × pixel ratio (Retina)
+        # × render_scale (optional extra supersampling).
+        self.dpr = 1.0
+        self.render_scale = 1.0
         self.bloom_radius = 0.5      # 0 = tight glow, 1 = wide halos
-        self._accum_tex = None
-        self._accum_depth = None     # T19: depth for the opaque model surface
-        self._accum = None
-        self._bloom_tex = []         # 3 levels × ping-pong pair
-        self._bloom_fbo = []
-        self._bloom_sizes = []
+        self.bloom_threshold = 0.8   # linear luminance where the glow starts
+        self.vignette = 0.0
+        self.samples = min(4, ctx.max_samples)
+        self._gl_objs = []           # size-dependent GL objects
+        self._trail_idx = 0
+        self._resolved = False
         self._build_internal()
 
         # ── Static floor grid (world-space, does not rotate with the object) ──
@@ -700,72 +837,99 @@ class GLRenderer:
         if self.output_fbo is not None:
             return self.output_fbo
         if self._screen is None:
-            self._screen = self.ctx.screen
+            # re-detect the default framebuffer (its size changes with the
+            # window) and force its viewport: detect_framebuffer can report a
+            # stale size inherited from the previous GL viewport
+            self._screen = self.ctx.detect_framebuffer()
+            self._screen.viewport = (0, 0, int(round(self.w * self.dpr)),
+                                     int(round(self.h * self.dpr)))
         return self._screen
 
     def _build_internal(self):
-        """(Re)create the supersampled HDR accum + 3-level bloom pyramid."""
-        for pair_f, pair_t in zip(self._bloom_fbo, self._bloom_tex):
-            for f in pair_f:
-                f.release()
-            for t in pair_t:
-                t.release()
-        if self._accum is not None:
-            self._accum.release(); self._accum_tex.release()
-            self._accum_depth.release()
+        """(Re)create the scene MSAA buffer, the trail layer and the bloom chain."""
+        for obj in self._gl_objs:
+            obj.release()
+        objs = self._gl_objs = []
+        ctx = self.ctx
 
-        rw = max(8, int(self.w * self.render_scale))
-        rh = max(8, int(self.h * self.render_scale))
+        def tex(size, dtype="f2"):
+            t = ctx.texture(size, 4, dtype=dtype)
+            t.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            t.repeat_x = t.repeat_y = False
+            objs.append(t)
+            return t
+
+        def fbo(color, depth=None):
+            f = ctx.framebuffer(color_attachments=[color], depth_attachment=depth)
+            objs.append(f)
+            return f
+
+        # render_scale = total pixel density wanted per logical pixel: a
+        # Retina framebuffer (dpr 2) already provides it, MSAA does the rest
+        k = max(self.dpr, self.render_scale)
+        rw, rh = max(8, int(self.w * k)), max(8, int(self.h * k))
         self._internal_size = (rw, rh)
 
-        self._accum_tex = self.ctx.texture((rw, rh), 4, dtype="f2")
-        self._accum_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
-        self._accum_depth = self.ctx.depth_renderbuffer((rw, rh))
-        self._accum = self.ctx.framebuffer(color_attachments=[self._accum_tex],
-                                           depth_attachment=self._accum_depth)
-        self._accum.use()
-        self.ctx.clear(*self.bg, 1.0)
+        # resolved scene (what the trail pass reads)
+        self._scene_tex = tex((rw, rh))
+        self._scene_depth = ctx.depth_renderbuffer((rw, rh))
+        objs.append(self._scene_depth)
+        if self.samples > 1:
+            rb = ctx.renderbuffer((rw, rh), 4, samples=self.samples, dtype="f2")
+            db = ctx.depth_renderbuffer((rw, rh), samples=self.samples)
+            objs += [rb, db]
+            self._scene_resolve = fbo(self._scene_tex)
+            self._accum = fbo(rb, db)            # draw target of the frame
+        else:
+            self._scene_resolve = None
+            self._accum = fbo(self._scene_tex, self._scene_depth)
 
-        # bloom pyramid: 3 levels (1/2, 1/4, 1/8 of internal res), 2 tex each
-        self._bloom_tex, self._bloom_fbo, self._bloom_sizes = [], [], []
-        for div in (2, 4, 8):
-            bw, bh = max(4, rw // div), max(4, rh // div)
-            pair = [self.ctx.texture((bw, bh), 4, dtype="f2") for _ in range(2)]
-            for t in pair:
-                t.filter = (moderngl.LINEAR, moderngl.LINEAR)
-            self._bloom_tex.append(pair)
-            self._bloom_fbo.append(
-                [self.ctx.framebuffer(color_attachments=[t]) for t in pair])
-            self._bloom_sizes.append((bw, bh))
+        # persistent trail layer (ping-pong)
+        self._trail_tex = [tex((rw, rh)), tex((rw, rh))]
+        self._trail_fbo = [fbo(t) for t in self._trail_tex]
+        for f in self._trail_fbo:
+            f.use()
+            ctx.clear(0.0, 0.0, 0.0, 0.0)
+
+        # bloom chain: 6 levels from 1/2 down to 1/64 of the internal size
+        self._bloom_down, self._bloom_up = [], []
+        bw, bh = rw, rh
+        for _ in range(6):
+            bw, bh = max(2, bw // 2), max(2, bh // 2)
+            d, u = tex((bw, bh)), tex((bw, bh))
+            self._bloom_down.append((d, fbo(d)))
+            self._bloom_up.append((u, fbo(u)))
 
         # point sizes are expressed in internal pixels
         self.set_size_mult(getattr(self, "_size_mult", 1.0))
 
     def set_render_scale(self, scale: float):
-        """Supersampling factor (1.0–2.0). Rebuilds the internal buffers."""
+        """Supersampling (1.0–2.0 internal px per logical px; no effect below
+        the pixel ratio — a Retina screen is already at 2)."""
         scale = min(max(scale, 1.0), 2.0)
         if abs(scale - self.render_scale) > 1e-3:
             self.render_scale = scale
             self._build_internal()
 
+    def set_pixel_ratio(self, dpr: float):
+        """Framebuffer pixels per logical pixel (2 on a Retina screen)."""
+        dpr = max(float(dpr), 0.5)
+        if abs(dpr - self.dpr) > 1e-3:
+            self.dpr = dpr
+            self._screen = None
+            self._build_internal()
+
     def resize(self, w: int, h: int):
-        """Rebuild size-dependent GL state after a window resize / fullscreen."""
+        """Rebuild size-dependent GL state after a window resize / fullscreen.
+        w, h are LOGICAL sizes (the camera framing does not depend on dpr)."""
         if (w, h) == (self.w, self.h):
             return
         self.w, self.h = w, h
         self.cam_dist = (h / 2.0) / np.tan(self.fov / 2.0)
         self._proj = _perspective(self.fov, w / h, 10.0, 8000.0)
         self._view = _translate(0.0, 0.0, -self.cam_dist)
-
-        # re-detect the default framebuffer (its size changed with the window)
-        # and force its viewport: detect_framebuffer can report a stale size
-        # inherited from the previous GL viewport.
-        self._screen = self.ctx.detect_framebuffer()
-        self._screen.viewport = (0, 0, w, h)
-
-        # recreate the supersampled accum + bloom pyramid at the new size
+        self._screen = None
         self._build_internal()
-
         # force the HUD overlay quad/texture to be rebuilt at the new size
         self._overlay_h = 0
 
@@ -802,7 +966,9 @@ class GLRenderer:
                         shift_r=(0.0, 0.0), shift_g=(0.0, 0.0), shift_b=(0.0, 0.0)):
         """Update the post-processing (composite) uniforms."""
         p = self.comp_prog
-        p["u_brightness"].value = float(brightness)
+        # the exposure slider was tuned on display values: square it so its
+        # perceived range stays similar in linear light
+        p["u_brightness"].value = float(brightness) ** 2
         p["u_shift_r"].value = tuple(shift_r)
         p["u_shift_g"].value = tuple(shift_g)
         p["u_shift_b"].value = tuple(shift_b)
@@ -878,7 +1044,7 @@ class GLRenderer:
         """Global particle size multiplier (control-panel 'Taille points').
         Point sizes are expressed in INTERNAL (supersampled) pixels."""
         self._size_mult = float(mult)
-        s = self.cam_dist * self.render_scale
+        s = self.cam_dist * max(self.dpr, self.render_scale)
         self.point_prog["u_size_scale"].value = float(s * mult)
         if self.gpu_prog is not None:
             self.gpu_prog["u_size_scale"].value = float(s)
@@ -919,7 +1085,7 @@ class GLRenderer:
             "u_low_mid", "u_mid", "u_rms", "u_centroid",
             "u_hz10", "u_hz11", "u_hz12", "u_depth", "u_edge", "u_inflate",
             "u_mturb", "u_model_gain"))
-        self._accum.use()
+        self._points_target().use()
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = (moderngl.ONE, moderngl.ONE)   # additive
         self._gpu_vao.render(mode=moderngl.POINTS, vertices=self._gpu_count)
@@ -991,11 +1157,6 @@ class GLRenderer:
             self._write_frame_uniforms(prog, uniforms, names)
         ctx, fbo, vaos = self.ctx, self._accum, self._mesh_vaos
         fbo.use()
-        # clear depth only: the color buffer holds the trails
-        fbo.color_mask = (False, False, False, False)
-        fbo.clear(depth=1.0)
-        fbo.color_mask = (True, True, True, True)
-        fbo.use()     # re-applies the color mask to the GL state
         self._matcaps[self._matcap_idx].use(0)
         self.mesh_prog["u_matcap"].value = 0
         self._model_tex.use(1)
@@ -1038,12 +1199,24 @@ class GLRenderer:
         ctx.disable(moderngl.DEPTH_TEST)
 
     def begin_frame(self):
-        """Fade the accumulation buffer toward the background (trail decay)."""
+        """Start a frame: clear the scene buffer (the trails live apart)."""
         self._accum.use()
-        self.ctx.enable(moderngl.BLEND)
-        self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
-        self.fade_prog["u_fade"].value = self.fade
-        self._render_fullscreen(self.fade_prog)
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0, depth=1.0)
+        self._resolved = False
+
+    def _resolve(self):
+        """MSAA scene → _scene_tex (once per frame)."""
+        if not self._resolved and self._scene_resolve is not None:
+            self.ctx.copy_framebuffer(self._scene_resolve, self._accum)
+        self._resolved = True
+
+    def _points_target(self):
+        """Soft glowing points gain nothing from MSAA but cost 4× the blending:
+        they are drawn into the resolved buffer, after the geometry."""
+        if self._scene_resolve is None:
+            return self._accum
+        self._resolve()
+        return self._scene_resolve
 
     def draw_particles(self, data: np.ndarray, count: int):
         """
@@ -1052,60 +1225,89 @@ class GLRenderer:
         """
         if count <= 0:
             return
-        self._accum.use()
+        self._points_target().use()
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = (moderngl.ONE, moderngl.ONE)   # additive
         self._vbo.write(data[:count].astype("f4").tobytes())
         self._point_vao.render(mode=moderngl.POINTS, vertices=count)
 
     def end_frame(self):
-        """Bloom pyramid + composite (supersampled accum → window)."""
-        self.ctx.disable(moderngl.BLEND)
-        self.blur_prog["u_tex"].value = 0
+        """Resolve MSAA, merge into the trails, bloom chain, composite."""
+        ctx = self.ctx
+        ctx.disable(moderngl.BLEND)
+        ctx.disable(moderngl.DEPTH_TEST)
+        self._resolve()
 
-        # build the 3-level pyramid: downsample from the previous level,
-        # then one separable Gaussian blur per level
-        src_tex = self._accum_tex
-        for lvl in range(3):
-            pair_t, pair_f = self._bloom_tex[lvl], self._bloom_fbo[lvl]
-            bw, bh = self._bloom_sizes[lvl]
-            pair_f[0].use()
+        # trails: trail' = merge(trail × decay, scene)
+        src, dst = self._trail_idx, 1 - self._trail_idx
+        self._trail_fbo[dst].use()
+        self._scene_tex.use(0)
+        self._trail_tex[src].use(1)
+        tp = self.trail_prog
+        tp["u_scene"].value, tp["u_trail"].value = 0, 1
+        tp["u_decay"].value = float(1.0 - min(max(self.fade, 0.0), 1.0))
+        self._render_fullscreen(tp)
+        self._trail_idx = dst
+        trail = self._trail_tex[dst]
+
+        # bloom: thresholded 13-tap downsample chain …
+        dp = self.down_prog
+        dp["u_tex"].value = 0
+        dp["u_threshold"].value = float(self.bloom_threshold)
+        dp["u_knee"].value = float(max(self.bloom_threshold * 0.5, 0.05))
+        src_tex = trail
+        for i, (t, f) in enumerate(self._bloom_down):
+            f.use()
             src_tex.use(0)
-            self.blur_prog["u_dir"].value = (0.0, 0.0)   # copy/downsample
-            self._render_fullscreen(self.blur_prog)
-            # horizontal then vertical blur
-            pair_f[1].use()
-            pair_t[0].use(0)
-            self.blur_prog["u_dir"].value = (1.0 / bw, 0.0)
-            self._render_fullscreen(self.blur_prog)
-            pair_f[0].use()
-            pair_t[1].use(0)
-            self.blur_prog["u_dir"].value = (0.0, 1.0 / bh)
-            self._render_fullscreen(self.blur_prog)
-            src_tex = pair_t[0]      # next level downsamples this one
+            dp["u_texel"].value = (1.0 / src_tex.width, 1.0 / src_tex.height)
+            dp["u_prefilter"].value = 1 if i == 0 else 0
+            self._render_fullscreen(dp)
+            src_tex = t
+        # … then tent upsample, each level blended with the coarser one
+        up = self.up_prog
+        up["u_low"].value, up["u_cur"].value = 0, 1
+        up["u_scatter"].value = float(0.45 + 0.5 * min(max(self.bloom_radius, 0.0), 1.0))
+        low = self._bloom_down[-1][0]
+        for i in range(len(self._bloom_down) - 2, -1, -1):
+            u_tex, u_fbo = self._bloom_up[i]
+            u_fbo.use()
+            low.use(0)
+            self._bloom_down[i][0].use(1)
+            up["u_texel"].value = (1.0 / low.width, 1.0 / low.height)
+            self._render_fullscreen(up)
+            low = u_tex
 
-        # composite to the output target (downsamples the supersampled scene)
-        self._target.use()
-        self.ctx.disable(moderngl.BLEND)
-        self._accum_tex.use(0)
-        for lvl in range(3):
-            self._bloom_tex[lvl][0].use(1 + lvl)
-            self.comp_prog[f"u_bloom{lvl}"].value = 1 + lvl
-        self.comp_prog["u_scene"].value = 0
-        self.comp_prog["u_bloom_intensity"].value = self.bloom_intensity
-        self.comp_prog["u_bloom_radius"].value = float(self.bloom_radius)
-        self._render_fullscreen(self.comp_prog)
+        # composite to the output target (resamples the internal resolution)
+        target = self._target
+        target.use()
+        trail.use(0)
+        low.use(1)
+        cp = self.comp_prog
+        cp["u_scene"].value, cp["u_bloom"].value = 0, 1
+        cp["u_bloom_intensity"].value = self.bloom_intensity
+        cp["u_bg"].value = self.bg
+        cp["u_vignette"].value = float(self.vignette)
+        ow, oh = target.viewport[2], target.viewport[3]
+        cp["u_out_texel"].value = (1.0 / max(ow, 1), 1.0 / max(oh, 1))
+        cp["u_ss"].value = float(self._internal_size[0] / max(ow, 1))
+        self._render_fullscreen(cp)
 
     # ------------------------------------------------------------------
     # HUD overlay
 
-    def draw_overlay(self, rgba_bytes: bytes, width: int, height: int):
+    def has_overlay(self, width: int, height: int) -> bool:
+        return (self._overlay_tex is not None and self._overlay_h == height
+                and self._overlay_tex.size[0] == width)
+
+    def draw_overlay(self, rgba_bytes, width: int, height: int):
         """
         Draw an RGBA buffer as a strip at the top of the screen.
-        rgba_bytes must be vertically flipped (GL bottom-up origin).
+        rgba_bytes must be vertically flipped (GL bottom-up origin);
+        None redraws the texture uploaded last time.
         """
-        if self._overlay_tex is None or self._overlay_h != height \
-                or self._overlay_tex.size[0] != width:
+        if rgba_bytes is None and not self.has_overlay(width, height):
+            return
+        if not self.has_overlay(width, height):
             if self._overlay_tex is not None:
                 self._overlay_tex.release()
             self._overlay_tex = self.ctx.texture((width, height), 4)
@@ -1114,7 +1316,7 @@ class GLRenderer:
 
             # Quad covering the top `height` px of the screen (NDC), uv 0..1.
             top = 1.0
-            bot = 1.0 - 2.0 * height / self.h
+            bot = 1.0 - 2.0 * height / (self.h * self.dpr)   # height in px
             #            x,    y,   u,   v
             quad = np.array([
                 -1.0, bot, 0.0, 0.0,
@@ -1131,7 +1333,8 @@ class GLRenderer:
                 [(self._overlay_vbo, "2f 2f", "in_pos", "in_uv")],
             )
 
-        self._overlay_tex.write(rgba_bytes)
+        if rgba_bytes is not None:
+            self._overlay_tex.write(rgba_bytes)
 
         self._target.use()
         self.ctx.enable(moderngl.BLEND)
@@ -1144,7 +1347,8 @@ class GLRenderer:
     # Internal
 
     def _render_fullscreen(self, prog):
-        # Rebind the empty VAO to the requested program and draw 3 verts.
-        vao = self.ctx.vertex_array(prog, [])
+        # one cached empty VAO per program (3 verts from gl_VertexID)
+        vao = self._fs_vaos.get(id(prog))
+        if vao is None:
+            vao = self._fs_vaos[id(prog)] = self.ctx.vertex_array(prog, [])
         vao.render(mode=moderngl.TRIANGLES, vertices=3)
-        vao.release()

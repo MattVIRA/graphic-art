@@ -10,14 +10,19 @@ Visual source (picked from the file extension, also via drag & drop / panel):
   --visual primitive:torus  → built-in test shape (icosphere, torus, box)
   (--image is kept as an alias of --visual)
 
-Keys: SPACE pause/resume  |  ESC quit  |  U back to the star
+Keys: SPACE pause/resume  |  ESC quit  |  U back to the star  |  F fullscreen
+
+The window is a GLFW window (native Retina framebuffer); pygame only provides
+the audio playback (mixer) and the HUD font.
 """
 
 import argparse
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 
+import glfw
 import pygame
 import moderngl
 
@@ -82,23 +87,49 @@ SMOOTHED_KEYS = ("bass", "low_mid", "mid", "high",
                  "hz_10_11", "hz_11_12", "hz_12_14", "rms")
 
 
+class FrameClock:
+    """dt + fps measurement and a frame-rate cap (the physics is per frame,
+    so a 120 Hz display must not double the animation speed)."""
+
+    def __init__(self, fps: int):
+        self.period = 1.0 / fps
+        self._last = time.perf_counter()
+        self.dt = self.period
+        self.fps = float(fps)
+
+    def tick(self):
+        now = time.perf_counter()
+        wait = self.period - (now - self._last)
+        if wait > 0.002:
+            time.sleep(wait - 0.001)
+        while time.perf_counter() - self._last < self.period:
+            pass
+        now = time.perf_counter()
+        self.dt = now - self._last
+        self._last = now
+        self.fps += (1.0 / max(self.dt, 1e-4) - self.fps) * 0.1
+
+
 # ── HUD ──────────────────────────────────────────────────────────────────────
 
 class Hud:
-    """Renders a one-line status bar to a pygame surface → uploaded as a GL texture."""
+    """Renders a one-line status bar to a pygame surface → uploaded as a GL texture.
+    Drawn at the framebuffer resolution (scale = pixel ratio) for sharp text."""
 
-    HEIGHT = 40
+    HEIGHT = 40     # logical px
 
-    def __init__(self, width: int):
-        self.width = width
-        self.font = pygame.font.SysFont("monospace", 14)
-        self.surf = pygame.Surface((width, self.HEIGHT), pygame.SRCALPHA)
+    def __init__(self, width: int, scale: float = 1.0):
+        self.scale = scale
+        self.width = int(width * scale)
+        self.height = int(self.HEIGHT * scale)
+        self.font = pygame.font.SysFont("monospace", int(14 * scale))
+        self.surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
         self._last = None
 
     def build(self, features, tempo, paused, mode, n):
         line = (f"BPM {tempo:.0f}  |  RMS {features['rms']:.2f}  |  "
                 f"BASS {features['bass']:.2f}  |  {mode.upper()}  |  {n} pts")
-        hint = ("SPACE pause   F fullscreen   molette zoom   ESC quit"
+        hint = ("SPACE pause   F plein écran   molette zoom   ESC quitter"
                 + ("   U back to star" if mode != "star"
                    else "   drop an image or a 3D model"))
         if paused:
@@ -108,8 +139,11 @@ class Hud:
             return self.surf
         self._last = key
         self.surf.fill((0, 0, 0, 0))
-        self.surf.blit(self.font.render(line, True, (120, 120, 150)), (12, 4))
-        self.surf.blit(self.font.render(hint, True, (70, 60, 80)), (12, 21))
+        k = self.scale
+        self.surf.blit(self.font.render(line, True, (120, 120, 150)),
+                       (int(12 * k), int(4 * k)))
+        self.surf.blit(self.font.render(hint, True, (70, 60, 80)),
+                       (int(12 * k), int(21 * k)))
         return self.surf
 
     def to_bytes(self, surf):
@@ -134,18 +168,55 @@ def main():
         print(f"[error] File not found: {args.audio}")
         sys.exit(1)
 
-    # ── pygame + OpenGL context ──────────────────────────────────────────────
-    pygame.init()
+    # ── audio (pygame mixer) + font — no pygame window ──────────────────────
     pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
+    pygame.font.init()
 
-    pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
-    pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 3)
-    pygame.display.gl_set_attribute(
-        pygame.GL_CONTEXT_PROFILE_MASK, pygame.GL_CONTEXT_PROFILE_CORE)
+    # ── GLFW window + OpenGL 3.3 core context (Retina framebuffer) ──────────
+    glfw.init_hint(glfw.COCOA_CHDIR_RESOURCES, glfw.FALSE)
+    if not glfw.init():
+        print("[error] GLFW init failed")
+        sys.exit(1)
+    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
+    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
+    glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
+    glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
+    glfw.window_hint(glfw.COCOA_RETINA_FRAMEBUFFER, glfw.TRUE)
+    window = glfw.create_window(WIDTH, HEIGHT, "Graphic Art", None, None)
+    if not window:
+        glfw.terminate()
+        print("[error] could not create the OpenGL window")
+        sys.exit(1)
+    glfw.make_context_current(window)
+    glfw.swap_interval(1)
+    clock = FrameClock(FPS)
 
-    pygame.display.set_mode((WIDTH, HEIGHT), pygame.OPENGL | pygame.DOUBLEBUF)
-    pygame.display.set_caption("Graphic Art")
-    clock = pygame.time.Clock()
+    # input → event queue, drained in the main loop
+    events = []
+    glfw.set_key_callback(window, lambda w, key, sc, action, mods:
+                          events.append(("key", key)) if action == glfw.PRESS else None)
+    glfw.set_scroll_callback(window, lambda w, dx, dy: events.append(("wheel", dy)))
+    glfw.set_drop_callback(window, lambda w, paths:
+                           events.extend(("drop", p) for p in paths))
+    windowed_geom = None     # (x, y, w, h) to restore after fullscreen
+
+    def toggle_fullscreen():
+        nonlocal windowed_geom
+        if windowed_geom is None:
+            x, y = glfw.get_window_pos(window)
+            windowed_geom = (x, y, *glfw.get_window_size(window))
+            mon = glfw.get_primary_monitor()
+            mode = glfw.get_video_mode(mon)
+            glfw.set_window_monitor(window, mon, 0, 0, mode.size.width,
+                                    mode.size.height, mode.refresh_rate)
+        else:
+            glfw.set_window_monitor(window, None, *windowed_geom, 0)
+            windowed_geom = None
+
+    def pixel_ratio():
+        ww, _ = glfw.get_window_size(window)
+        fw, _ = glfw.get_framebuffer_size(window)
+        return fw / max(ww, 1)
 
     ctx = moderngl.create_context()
 
@@ -153,6 +224,7 @@ def main():
     max_particles = max(args.particles, 90000)
     renderer = GLRenderer(ctx, (WIDTH, HEIGHT), max_particles,
                           bg_color=BG_COLOR, fade=FADE, bloom_intensity=BLOOM_INTENSITY)
+    renderer.set_pixel_ratio(pixel_ratio())
     # T1: with GPU physics every image pixel can be a particle (≤ ~1M);
     # the CPU fallback keeps the old 90k budget
     max_image = 1_000_000 if renderer.gpu_prog is not None else 90_000
@@ -190,7 +262,7 @@ def main():
         player.play()
         source = player
         hud_tempo = analyzer.tempo
-        pygame.display.set_caption(f"Graphic Art  ·  {os.path.basename(path)}")
+        glfw.set_window_title(window, f"Graphic Art  ·  {os.path.basename(path)}")
 
     def start_live(device):
         nonlocal source
@@ -198,9 +270,9 @@ def main():
         from audio.live import LiveAnalyzer
         print(f"\nLive capture on input device {device}")
         source = LiveAnalyzer(device=device)
-        pygame.display.set_caption("Graphic Art  ·  LIVE")
+        glfw.set_window_title(window, "Graphic Art  ·  LIVE")
 
-    hud = Hud(WIDTH)
+    hud = Hud(WIDTH, renderer.dpr)
     panel = ControlPanel()   # second window with live sliders
 
     # ── Visual source: star / image / 3D model, chosen by file extension ──
@@ -254,24 +326,27 @@ def main():
     envelope = Envelope()   # T4: attack/release smoothing of the features
     next_monitor = 0.0      # T8: next time a monitoring packet is due
     budget_wanted, budget_t = None, 0.0   # debounced n_points rebuild
+    hud_next = 0.0          # next HUD text refresh
     while running:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
+        glfw.poll_events()
+        if glfw.window_should_close(window):
+            running = False
+        for kind, val in events:
+            if kind == "key":
+                if val == glfw.KEY_ESCAPE:
                     running = False
-                elif event.key == pygame.K_SPACE:
+                elif val == glfw.KEY_SPACE:
                     if source is not None:
                         source.toggle_pause()
-                elif event.key == pygame.K_u:
+                elif val == glfw.KEY_U:
                     unload_visual()
-                elif event.key == pygame.K_f:
-                    pygame.display.toggle_fullscreen()
-            elif event.type == pygame.MOUSEWHEEL:
-                wheel_zoom = max(0.2, min(4.0, wheel_zoom * (1.06 ** event.y)))
-            elif event.type == pygame.DROPFILE:
-                load_visual(event.file)
+                elif val == glfw.KEY_F:
+                    toggle_fullscreen()
+            elif kind == "wheel":
+                wheel_zoom = max(0.2, min(4.0, wheel_zoom * (1.06 ** val)))
+            elif kind == "drop":
+                load_visual(val)
+        events.clear()
 
         if pending_model is not None and pending_model[2].done():
             path, up, fut = pending_model
@@ -284,12 +359,16 @@ def main():
         if source is not None and source.is_done:
             stop_source()    # file ended: keep the window open, go silent
 
-        # macOS animates the fullscreen transition, so the window size changes
-        # some frames AFTER toggle_fullscreen(): watch it every frame instead.
-        win_size = pygame.display.get_window_size()
-        if win_size != (renderer.w, renderer.h):
+        # the window size (and the pixel ratio, when it moves to another
+        # screen) can change at any time: watch both every frame
+        win_size = glfw.get_window_size(window)
+        dpr = pixel_ratio()
+        if (win_size[0] > 0 and win_size[1] > 0
+                and (win_size != (renderer.w, renderer.h)
+                     or abs(dpr - renderer.dpr) > 1e-3)):
+            renderer.set_pixel_ratio(dpr)
             renderer.resize(*win_size)
-            hud = Hud(win_size[0])
+            hud = Hud(win_size[0], dpr)
 
         features = (source.get_current_features()
                     if source is not None else SILENT_FEATURES)
@@ -310,7 +389,7 @@ def main():
                 stop_source()
 
         # ── particle budget: rebuild ~0.5 s after the slider settles ──
-        t_now = pygame.time.get_ticks() * 0.001
+        t_now = glfw.get_time()
         want_budget = min(int(p["n_points"]) * 1000, max_image)
         if want_budget != particles.max_image:
             if budget_wanted != want_budget:
@@ -321,7 +400,7 @@ def main():
             budget_wanted = None
 
         # ── T4: smooth the features (fast attack, slow release) ──
-        dt = max(clock.get_time() / 1000.0, 1e-3)
+        dt = max(clock.dt, 1e-3)
         react = p["reactivity"]
         features = dict(features)
         for k in SMOOTHED_KEYS:
@@ -367,7 +446,7 @@ def main():
         )
 
         # ── T8: monitoring packet for the panel (VU meters + status bar) ──
-        now = pygame.time.get_ticks() * 0.001
+        now = glfw.get_time()
         if now >= next_monitor:
             next_monitor = now + ControlPanel.MONITOR_INTERVAL
             if source is None:
@@ -380,7 +459,7 @@ def main():
                 "bands": [float(b) for b in bands],
                 "rms": float(features["rms"]),
                 "bpm": float(features.get("bpm", 0.0) or hud_tempo),
-                "fps": clock.get_fps(),
+                "fps": clock.fps,
                 "source": src_label,
                 "visual": particles.mode,   # greys out the unused Objet group
             })
@@ -418,7 +497,7 @@ def main():
             contrast=con_post,
             invert=neg_post,
             grain=p["grain"],
-            time=pygame.time.get_ticks() * 0.001,
+            time=glfw.get_time(),
             shift_r=(fx["Décalage rouge"] * sh, 0.0),
             shift_g=(0.0, fx["Décalage vert"] * sh),
             shift_b=(-fx["Décalage bleu"] * sh, 0.0),
@@ -436,7 +515,7 @@ def main():
         if renderer.gpu_prog is not None:
             # T1: stateless physics in the vertex shader — CPU only sends uniforms
             rp = particles.gpu_uniforms(features, p2,
-                                        time_s=pygame.time.get_ticks() * 0.001)
+                                        time_s=glfw.get_time())
             if particles.rev != gpu_rev:
                 renderer.upload_particle_static(*particles.build_static())
                 renderer.upload_mesh(particles.model_mesh
@@ -454,7 +533,7 @@ def main():
         # axis precession: the rotation axis itself spins around the scene's
         # vertical axis at the origin when enabled
         if p["axis_spin"] >= 0.5:
-            axis_precession += p["axis_spin_speed"] * deg * clock.get_time() / 1000.0
+            axis_precession += p["axis_spin_speed"] * deg * clock.dt
 
         renderer.set_zoom(p["zoom"] * wheel_zoom)   # before set_transform (view matrix)
         renderer.set_transform(
@@ -485,18 +564,28 @@ def main():
             renderer.draw_particles(out, count)
         renderer.end_frame()
 
-        surf = hud.build(features, features.get("bpm", 0.0) or hud_tempo,
-                         source.is_paused if source is not None else False,
-                         particles.mode, particles.n)
-        renderer.draw_overlay(hud.to_bytes(surf), hud.width, Hud.HEIGHT)
+        # the HUD texture is re-uploaded at most 5×/s and only when its text
+        # changed: writing a texture the GPU still reads stalls the pipeline
+        now = glfw.get_time()
+        hud_bytes = None
+        if now >= hud_next:
+            hud_next = now + 0.2
+            last = hud._last
+            surf = hud.build(features, features.get("bpm", 0.0) or hud_tempo,
+                             source.is_paused if source is not None else False,
+                             particles.mode, particles.n)
+            if hud._last != last or not renderer.has_overlay(hud.width, hud.height):
+                hud_bytes = hud.to_bytes(surf)
+        renderer.draw_overlay(hud_bytes, hud.width, hud.height)
 
-        pygame.display.flip()
-        clock.tick(FPS)
+        glfw.swap_buffers(window)
+        clock.tick()
 
     stop_source()
     model_loader.shutdown(wait=False, cancel_futures=True)
     panel.save_autosave()   # settings only — source and image are not saved
     panel.close()
+    glfw.terminate()
     pygame.quit()
 
 
