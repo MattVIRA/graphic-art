@@ -16,6 +16,7 @@ import json
 import multiprocessing as mp
 import os
 import queue
+import random
 
 from gfx.matcaps import NAMES as MATCAP_NAMES
 from visuals.mesh import UP_AXES as MESH_UP_AXES
@@ -41,6 +42,31 @@ def _save_presets_file(d: dict):
             json.dump(d, fh, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"[warning] preset save failed: {e}")
+
+
+# Presets propres à un onglet (Vidéo, Physique) : {onglet: {nom: {clé: val}}}
+# sous la clé réservée "_tab_presets". Les presets codés en dur ne servent que
+# de graines à la première ouverture, ensuite tout est modifiable.
+TAB_PRESETS_KEY = "_tab_presets"
+
+
+def _load_tab_presets(tab: str, builtin: dict) -> dict:
+    d = _load_presets_file()
+    store = d.get(TAB_PRESETS_KEY)
+    if not isinstance(store, dict):
+        store = d[TAB_PRESETS_KEY] = {}
+    if not isinstance(store.get(tab), dict):
+        store[tab] = {n: dict(v) for n, v in builtin.items()}
+        _save_presets_file(d)
+    return store[tab]
+
+
+def _save_tab_presets(tab: str, presets: dict):
+    d = _load_presets_file()
+    if not isinstance(d.get(TAB_PRESETS_KEY), dict):
+        d[TAB_PRESETS_KEY] = {}
+    d[TAB_PRESETS_KEY][tab] = presets
+    _save_presets_file(d)
 
 
 DEFAULTS = {
@@ -190,6 +216,44 @@ VIDEO_GROUPS = [
 ]
 
 VIDEO_SLIDERS = [s[:5] for _, grp in VIDEO_GROUPS for s in grp]
+
+# Tirage aléatoire : plages « sûres » (pas d'écran noir ou saturé d'office).
+# Les réglages absents prennent toute leur plage ; render_scale est exclu
+# (c'est un réglage de performance, pas d'esthétique).
+RANDOM_VIDEO_RANGES = {
+    "red": (0.5, 1.5), "green": (0.5, 1.5), "blue": (0.5, 1.5),
+    "contrast": (0.7, 1.6), "brightness": (0.6, 1.6),
+    "bloom": (0.3, 2.2), "trail": (0.1, 0.6), "grain": (0.0, 0.2),
+    "point_size": (0.5, 2.0), "zoom": (0.6, 1.6),
+}
+RANDOM_VIDEO_SKIP = {"render_scale"}
+
+
+def _snap(v: float, lo: float, step: float) -> float:
+    return round(round((v - lo) / step) * step + lo, 6)
+
+
+def random_video_values() -> dict:
+    vals = {}
+    for _label, key, lo, hi, step in VIDEO_SLIDERS:
+        if key in RANDOM_VIDEO_SKIP:
+            continue
+        a, b = RANDOM_VIDEO_RANGES.get(key, (lo, hi))
+        vals[key] = _snap(random.uniform(a, b), lo, step)
+    if random.random() < 0.8:       # le négatif reste l'exception
+        vals["negative"] = 0.0
+    return vals
+
+
+def random_physics_values() -> dict:
+    vals = {}
+    for i in range(len(EQ_BANDS)):
+        # ~1 bande sur 3 reste muette : un routing lisible plutôt qu'un chaos
+        fx = 0 if random.random() < 0.3 else random.randrange(1, len(EFFECTS))
+        vals[f"band{i}_fx"] = float(fx)
+        vals[f"band{i}_amt"] = _snap(random.uniform(0.3, 1.8), 0.0, 0.05)
+        vals[f"band{i}_scope"] = float(random.randrange(len(PHYS_SCOPE_OPTIONS)))
+    return vals
 
 OBJECT_SLIDERS = [
     ("Turbulence", "turbulence", 0.0, 3.0, 0.05,
@@ -571,6 +635,64 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                        {k: DEFAULTS[k] for k in tab_keys.get(tab, ())})
                    ).pack(fill="x", padx=10, pady=(12, 4))
 
+    def random_button(parent, make_values):
+        ttk.Button(parent, text="🎲  Paramètres aléatoires",
+                   command=lambda: apply_values(make_values())
+                   ).pack(fill="x", padx=10, pady=(0, 4))
+
+    def tab_presets_ui(parent, tab, builtin, **pack_kw):
+        """Presets propres à un onglet : liste + Charger / Sauver… / ✕.
+        Un preset = snapshot des réglages de l'onglet seulement."""
+        from tkinter import messagebox, simpledialog
+        grp = ttk.LabelFrame(parent, text="Presets")
+        grp.pack(fill="x", padx=10, **pack_kw)
+        combo = ttk.Combobox(grp, state="readonly", width=14, font=FONT_SM)
+        combo.grid(row=0, column=0, sticky="ew", padx=(8, 4), pady=8)
+        btns = {t: ttk.Button(grp, text=t, width=w) for t, w in
+                (("Charger", 8), ("Sauver…", 8), ("✕", 2))}
+        for c, b in enumerate(btns.values(), start=1):
+            b.grid(row=0, column=c, padx=(0, 4 if c < 3 else 8), pady=8)
+        grp.columnconfigure(0, weight=1)
+        presets = _load_tab_presets(tab, builtin)
+
+        def refresh(select=None):
+            names = sorted(presets)
+            combo.configure(values=names or ["(aucun preset)"])
+            combo.set(select if select in presets else
+                      (names[0] if names else "(aucun preset)"))
+
+        def load():
+            vals = presets.get(combo.get())
+            if vals:
+                apply_values({k: v for k, v in vals.items() if k in DEFAULTS})
+
+        def save():
+            name = simpledialog.askstring(
+                "Preset", "Nom du preset (un nom existant le remplace) :",
+                initialvalue=combo.get() if combo.get() in presets else "",
+                parent=root)
+            name = (name or "").strip()
+            if not name:
+                return
+            if name in presets and not messagebox.askyesno(
+                    "Preset", f"Remplacer « {name} » ?", parent=root):
+                return
+            presets[name] = {k: float(v) for k, v in snapshot().items()
+                             if k in tab_keys.get(tab, ())}
+            _save_tab_presets(tab, presets)
+            refresh(name)
+
+        def delete():
+            if combo.get() in presets:
+                del presets[combo.get()]
+                _save_tab_presets(tab, presets)
+                refresh()
+
+        btns["Charger"].configure(command=load)
+        btns["Sauver…"].configure(command=save)
+        btns["✕"].configure(command=delete)
+        refresh()
+
     # ── Onglet Source ─────────────────────────────────────────────────
     tab_src = make_tab("Source")
 
@@ -628,6 +750,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
     # ── Onglet Vidéo ──────────────────────────────────────────────────
     tab_video = make_tab("Vidéo")
     reset_button(tab_video, "Vidéo")
+    random_button(tab_video, random_video_values)
     for group_title, group_sliders in VIDEO_GROUPS:
         grp = ttk.LabelFrame(tab_video, text=group_title)
         grp.pack(fill="x", padx=10, pady=(8, 2))
@@ -638,6 +761,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
 
     add_check(tab_video, "Grille du décor", "show_grid", pady=(8, 10))
     claim_keys("Vidéo")
+    tab_presets_ui(tab_video, "Vidéo", {}, pady=(4, 12))
 
     # ── Onglet Objet (image ou modèle 3D, T19) ────────────────────────
     tab_obj = make_tab("Objet")
@@ -733,6 +857,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
     # ── Onglet Physique (avec VU-mètres, T8) ──────────────────────────
     tab_phys = make_tab("Physique")
     reset_button(tab_phys, "Physique")
+    random_button(tab_phys, random_physics_values)
     ttk.Label(tab_phys,
               text="Chaque bande de fréquence pilote\nl'effet de son choix.",
               style="Muted.TLabel", justify="left"
@@ -777,15 +902,8 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
         build_slider(blk, "Intensité", f"band{i}_amt", 0.0, 2.0, 0.05)\
             .grid(row=1, column=1, sticky="ew", pady=(2, 0))
 
-    grp_physp = ttk.LabelFrame(tab_phys, text="Presets")
-    grp_physp.pack(fill="x", padx=10, pady=(12, 12))
-    for i, (name, values) in enumerate(PHYSICS_PRESETS.items()):
-        ttk.Button(grp_physp, text=name,
-                   command=lambda v=values: apply_values(v)
-                   ).grid(row=i // 2, column=i % 2, sticky="ew", padx=4, pady=3)
-    grp_physp.columnconfigure(0, weight=1)
-    grp_physp.columnconfigure(1, weight=1)
     claim_keys("Physique")
+    tab_presets_ui(tab_phys, "Physique", PHYSICS_PRESETS, pady=(12, 12))
 
     # ── Monitoring main → panel (T8) : VU-mètres + barre de statut ─────
     vu_levels = [0.0] * len(EQ_BANDS)

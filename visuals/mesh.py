@@ -25,6 +25,7 @@ MAX_RENDER_FACES = 2_000_000    # above: decimated for the surface/wire styles
 DECIMATE_TO = 1_000_000
 SHARP_ANGLE = np.radians(30.0)  # "arêtes vives" dihedral threshold
 GREY = 0.78
+NO_UV = -1000.0                 # uv.x below -10 → the shader uses vertex color
 N_BANDS = 64
 
 
@@ -141,18 +142,38 @@ def _build_render(parts):
     meshes = [p for p in parts if p.tm is not None]
     if not meshes:
         return None
-    vs, fs, cs, off = [], [], [], 0
+    # one texture per render mesh: the largest textured part wins, the other
+    # parts keep their (baked) vertex colors
+    tex_part = max((p for p in meshes if p.tex is not None),
+                   key=lambda p: p.area, default=None)
+    vs, fs, cs, uvs, off = [], [], [], [], 0
     for p in meshes:
         vs.append(p.tm.vertices)
         fs.append(p.tm.faces + off)
         cs.append(p.vcolor)
+        if p is tex_part:
+            uvs.append(np.column_stack([p.uv[:, 0], 1.0 - p.uv[:, 1]]))
+        else:
+            uvs.append(np.full((len(p.tm.vertices), 2), NO_UV, dtype=np.float32))
         off += len(p.tm.vertices)
-    colors = np.concatenate(cs)
-    m = trimesh.Trimesh(np.concatenate(vs), np.concatenate(fs),
-                        vertex_colors=(np.clip(colors, 0, 1) * 255).astype(np.uint8),
-                        process=False)
-    m.merge_vertices(merge_tex=True, merge_norm=True)
-    colors = np.asarray(m.visual.vertex_colors, dtype=np.float32)[:, :3] / 255.0
+    V, F = np.concatenate(vs), np.concatenate(fs)
+    colors0 = np.concatenate(cs)
+
+    # Textured: keep the vertices split along UV seams (a texture needs them)
+    # but compute normals / edges on the position-welded mesh, so the vertex
+    # shader still deforms both sides of a seam identically (no cracks).
+    textured = tex_part is not None and len(F) <= MAX_RENDER_FACES
+    if textured:
+        from trimesh.grouping import unique_rows
+        uniq, inv = unique_rows(V)
+        m = trimesh.Trimesh(V[uniq], inv[F], process=False)
+        colors = colors0[uniq]
+    else:
+        m = trimesh.Trimesh(V, F,
+                            vertex_colors=(np.clip(colors0, 0, 1) * 255).astype(np.uint8),
+                            process=False)
+        m.merge_vertices(merge_tex=True, merge_norm=True)
+        colors = np.asarray(m.visual.vertex_colors, dtype=np.float32)[:, :3] / 255.0
 
     if len(m.faces) > MAX_RENDER_FACES:
         print(f"  [warning] {len(m.faces):,} triangles — decimating to "
@@ -170,10 +191,25 @@ def _build_render(parts):
     boundary = m.edges_sorted[group_rows(m.edges_sorted, require_count=1)]
     sharp = np.concatenate([sharp, boundary]) if len(boundary) else sharp
 
+    if textured:
+        # back to the seam-split vertices; edges point at one representative
+        # of each welded position (same position → same deformation)
+        return {
+            "v": np.asarray(V, dtype=np.float64),
+            "n": np.asarray(m.vertex_normals, dtype=np.float32)[inv],
+            "c": colors0.astype(np.float32),
+            "uv": np.concatenate(uvs).astype(np.float32),
+            "tex": (np.clip(tex_part.tex, 0.0, 1.0) * 255).astype(np.uint8),
+            "tris": np.asarray(F, dtype=np.uint32),
+            "edges": uniq[np.asarray(edges)].astype(np.uint32),
+            "sharp": uniq[np.asarray(sharp)].astype(np.uint32),
+        }
     return {
         "v": np.asarray(m.vertices, dtype=np.float64),
         "n": np.asarray(m.vertex_normals, dtype=np.float32),
         "c": colors.astype(np.float32),
+        "uv": None,
+        "tex": None,
         "tris": np.asarray(m.faces, dtype=np.uint32),
         "edges": np.asarray(edges, dtype=np.uint32),
         "sharp": np.asarray(sharp, dtype=np.uint32),
@@ -297,16 +333,17 @@ def build_mesh(raw: RawModel, up: int, radius: float):
     if r is None:
         return None
     pos = _place(raw, r["v"], up, radius)
-    verts = np.empty((len(pos), 10), dtype=np.float32)
+    verts = np.empty((len(pos), 12), dtype=np.float32)
     verts[:, 0:3] = pos
     verts[:, 3:6] = _orient(r["n"], up)
     verts[:, 6:9] = r["c"]
     verts[:, 9] = _bands(pos)
+    verts[:, 10:12] = r["uv"] if r["uv"] is not None else NO_UV
     # additive lines: dense meshes (short edges) would burn to white
     e = r["edges"]
     mean_len = float(np.linalg.norm(pos[e[:, 0]] - pos[e[:, 1]], axis=1).mean())
-    return {"verts": verts, "tris": r["tris"], "edges": e, "sharp": r["sharp"],
-            "wire_gain": float(np.clip(mean_len / 25.0, 0.05, 1.0))}
+    return {"verts": verts, "tex": r["tex"], "tris": r["tris"], "edges": e,
+            "sharp": r["sharp"], "wire_gain": float(np.clip(mean_len / 25.0, 0.05, 1.0))}
 
 
 def prepare(path: str, up: int, radius: float, n: int) -> tuple:

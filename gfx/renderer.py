@@ -336,8 +336,10 @@ in vec3  in_pos;
 in vec3  in_normal;
 in vec3  in_color;
 in float in_band;
+in vec2  in_uv;
 out vec3  v_normal;
 out vec3  v_color;
+out vec2  v_uv;
 
 //%NOISE%
 //%MODEL%
@@ -347,6 +349,7 @@ void main() {
     vec3 p = model_displace(in_pos, in_normal, g);
     v_normal = mat3(u_model) * in_normal;
     v_color = in_color;
+    v_uv = in_uv;
     gl_Position = u_mvp * vec4(p, 1.0);
     gl_Position.z += u_depth_bias * gl_Position.w;
 }
@@ -369,12 +372,14 @@ vec3 grade(vec3 col) {
 SURFACE_FS = """
 #version 330
 uniform sampler2D u_matcap;
+uniform sampler2D u_tex;      // model texture (sampled per pixel via uv)
 uniform float u_rim;
 uniform vec3  u_rim_color;
 uniform float u_orig;         // 0 = pure matcap, 1 = model colors lit by it
 uniform float u_alpha;        // 1 = opaque, <1 = transparent (additive)
 in vec3  v_normal;
 in vec3  v_color;
+in vec2  v_uv;
 out vec4 f_color;
 """ + _MESH_GRADE_GLSL + """
 void main() {
@@ -382,7 +387,8 @@ void main() {
     if (!gl_FrontFacing) n = -n;          // open meshes: light the inside too
     vec3 mc = texture(u_matcap, n.xy * 0.495 + 0.5).rgb;
     float lum = dot(mc, vec3(0.299, 0.587, 0.114));
-    vec3 col = mix(mc, v_color * lum * 1.6, u_orig) * 1.1;
+    vec3 base = v_uv.x < -10.0 ? v_color : texture(u_tex, v_uv).rgb;
+    vec3 col = mix(mc, base * lum * 1.6, u_orig) * 1.1;
     float fres = pow(1.0 - max(n.z, 0.0), 3.0);
     col += u_rim_color * fres * u_rim;
     f_color = vec4(grade(col) * u_alpha, 1.0);
@@ -608,6 +614,7 @@ class GLRenderer:
                 tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
                 tex.repeat_x = tex.repeat_y = False
                 self._matcaps.append(tex)
+        self._model_tex = None       # texture of the current model
         self._mesh_objs = []         # GL buffers/VAOs of the current model
         self._mesh_vaos = None
         self._mesh_counts = {}
@@ -944,13 +951,27 @@ class GLRenderer:
         ctx = self.ctx
         vbo = ctx.buffer(np.ascontiguousarray(m["verts"], dtype="f4").tobytes())
         self._mesh_objs.append(vbo)
-        layout = [(vbo, "3f 3f 3f 1f", "in_pos", "in_normal", "in_color", "in_band")]
+        # model texture (1×1 white when the model has none: never sampled then)
+        img = m.get("tex")
+        if img is None:
+            img = np.full((1, 1, 3), 255, dtype=np.uint8)
+        h, w = img.shape[:2]
+        tex = ctx.texture((w, h), 3, np.ascontiguousarray(img).tobytes())
+        tex.build_mipmaps()
+        tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        tex.anisotropy = 8.0
+        self._mesh_objs.append(tex)
+        self._model_tex = tex
         vaos = {}
         for key, prog, idx in (("surf", self.mesh_prog, m["tris"]),
                                ("edges", self.wire_prog, m["edges"]),
                                ("sharp", self.wire_prog, m["sharp"])):
             if len(idx) == 0:
                 continue
+            # the wire program never reads uv (the compiler drops the attribute)
+            uv = "2f" if "in_uv" in prog._members else "2x4"
+            layout = [(vbo, f"3f 3f 3f 1f {uv}", "in_pos", "in_normal", "in_color",
+                       "in_band", *(("in_uv",) if uv == "2f" else ()))]
             ibo = ctx.buffer(np.ascontiguousarray(idx, dtype="u4").tobytes())
             vao = ctx.vertex_array(prog, layout, index_buffer=ibo,
                                    index_element_size=4)
@@ -977,6 +998,8 @@ class GLRenderer:
         fbo.use()     # re-applies the color mask to the GL state
         self._matcaps[self._matcap_idx].use(0)
         self.mesh_prog["u_matcap"].value = 0
+        self._model_tex.use(1)
+        self.mesh_prog["u_tex"].value = 1
         self.mesh_prog["u_depth_bias"].value = 0.0
 
         if style == 1:
