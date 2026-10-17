@@ -352,6 +352,7 @@ MESH_VS = _glsl("""
 #version 330
 uniform mat4  u_mvp;
 uniform mat4  u_model;
+uniform float u_view_d;       // camera distance (view = translate(0,0,-d))
 uniform float u_time;
 uniform float u_inflate;
 uniform float u_mturb;
@@ -362,9 +363,12 @@ in vec3  in_normal;
 in vec3  in_color;
 in float in_band;
 in vec2  in_uv;
+in float in_ao;
 out vec3  v_normal;
 out vec3  v_color;
 out vec2  v_uv;
+out vec3  v_view;             // surface → camera, view space
+out float v_ao;
 
 //%NOISE%
 //%MODEL%
@@ -375,6 +379,9 @@ void main() {
     v_normal = mat3(u_model) * in_normal;
     v_color = in_color;
     v_uv = in_uv;
+    v_ao = in_ao;
+    vec3 vp = (u_model * vec4(p, 1.0)).xyz - vec3(0.0, 0.0, u_view_d);
+    v_view = -vp;
     gl_Position = u_mvp * vec4(p, 1.0);
     gl_Position.z += u_depth_bias * gl_Position.w;
 }
@@ -394,30 +401,146 @@ vec3 grade(vec3 col) {
 }
 """
 
+# Surface shading. Two looks:
+#  - Studio (default): physically based — Lambert diffuse + GGX specular
+#    (Smith, Schlick Fresnel) from a 3-light photo studio (warm key, cool
+#    fill, strong back light) + a sky/ground gradient environment for the
+#    ambient and the reflections; roughness / metalness sliders.
+#  - Matcap: the original pre-lit sphere look.
+# Both get the per-vertex cavity occlusion and the fresnel rim.
 SURFACE_FS = """
 #version 330
 uniform sampler2D u_matcap;
 uniform sampler2D u_tex;      // model texture (sampled per pixel via uv)
+uniform int   u_shading;      // 0 studio, 1 matcap
+uniform float u_rough;
+uniform float u_metal;
+uniform float u_ao_amt;       // cavity occlusion strength
+uniform float u_light;        // light intensity (routable)
 uniform float u_rim;
 uniform vec3  u_rim_color;
-uniform float u_orig;         // 0 = pure matcap, 1 = model colors lit by it
+uniform float u_orig;         // 0 = neutral clay / pure matcap, 1 = model colors
 uniform float u_alpha;        // 1 = opaque, <1 = transparent (additive)
 in vec3  v_normal;
 in vec3  v_color;
 in vec2  v_uv;
+in vec3  v_view;
+in float v_ao;
 out vec4 f_color;
 """ + _MESH_GRADE_GLSL + _LINEAR_GLSL + """
+const float PI = 3.14159265;
+
+float D_ggx(float nh, float a) {
+    float a2 = a * a, d = nh * nh * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+float V_smith(float nv, float nl, float a) {
+    float k = a * 0.5;
+    return 0.25 / ((nv * (1.0 - k) + k) * (nl * (1.0 - k) + k));
+}
+vec3 F_schlick(vec3 f0, float vh) {
+    return f0 + (1.0 - f0) * pow(1.0 - vh, 5.0);
+}
+vec3 env(vec3 r, float rough) {   // studio sky / floor gradient (linear)
+    float t = r.y * 0.5 + 0.5;
+    vec3 c = mix(vec3(0.010, 0.010, 0.014), vec3(0.32, 0.34, 0.40),
+                 smoothstep(0.15, 0.95, t));
+    // soft box overhead-left, blurred by roughness
+    float sb = pow(max(dot(r, normalize(vec3(-0.45, 0.75, 0.5))), 0.0),
+                   mix(90.0, 4.0, rough));
+    return c + vec3(1.6) * sb * (1.0 - rough * 0.6);
+}
+
+vec3 studio(vec3 n, vec3 v, vec3 albedo, float ao) {
+    float a = max(u_rough * u_rough, 0.003);
+    vec3 f0 = mix(vec3(0.04), albedo, u_metal);
+    vec3 diff_c = albedo * (1.0 - u_metal);
+    float nv = max(dot(n, v), 1e-4);
+    vec3 L[3] = vec3[](normalize(vec3(-0.55, 0.65, 0.55)),    // key
+                       normalize(vec3( 0.75, 0.05, 0.45)),    // fill
+                       normalize(vec3( 0.25, 0.55, -0.80)));  // back
+    vec3 C[3] = vec3[](vec3(3.2, 2.95, 2.7), vec3(0.45, 0.55, 0.75),
+                       vec3(2.6, 2.7, 3.0));
+    vec3 col = vec3(0.0);
+    for (int i = 0; i < 3; i++) {
+        vec3 l = L[i], h = normalize(l + v);
+        float nl = max(dot(n, l), 0.0);
+        if (nl <= 0.0) continue;
+        float nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 0.0);
+        vec3 F = F_schlick(f0, vh);
+        vec3 spec = D_ggx(nh, a) * V_smith(nv, nl, a) * F;
+        col += ((1.0 - F) * diff_c / PI + spec) * C[i] * nl;
+    }
+    // environment: diffuse irradiance ≈ gradient along the normal,
+    // specular ≈ gradient + soft box along the reflection
+    vec3 Fe = f0 + (max(vec3(1.0 - u_rough), f0) - f0) * pow(1.0 - nv, 5.0);
+    col += diff_c * env(n, 1.0) * 0.9 * ao;
+    col += env(reflect(-v, n), u_rough) * Fe * mix(1.0, ao, 0.5);
+    return col * u_light;
+}
+
 void main() {
     vec3 n = normalize(v_normal);
     if (!gl_FrontFacing) n = -n;          // open meshes: light the inside too
-    vec3 mc = texture(u_matcap, n.xy * 0.495 + 0.5).rgb;
-    float lum = dot(mc, vec3(0.299, 0.587, 0.114));
+    vec3 v = normalize(v_view);
     vec3 base = v_uv.x < -10.0 ? v_color : texture(u_tex, v_uv).rgb;
-    vec3 col = mix(mc, base * lum * 1.6, u_orig) * 1.1;
-    float fres = pow(1.0 - max(n.z, 0.0), 3.0);
-    col += u_rim_color * fres * u_rim;
+    float ao = clamp(1.0 - u_ao_amt * (1.0 - v_ao), 0.0, 1.0);
+    float fres = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+    vec3 lin;
+    if (u_shading == 0) {
+        vec3 albedo = to_linear(mix(vec3(0.62), base, u_orig));
+        lin = studio(n, v, albedo, ao);
+        // grading sliders work in display space
+        lin = to_linear(grade(pow(lin, vec3(1.0 / 2.2))));
+        lin += to_linear(u_rim_color) * fres * u_rim * 0.5;
+    } else {
+        vec3 mc = texture(u_matcap, n.xy * 0.495 + 0.5).rgb;
+        float lum = dot(mc, vec3(0.299, 0.587, 0.114));
+        vec3 col = mix(mc, base * lum * 1.6, u_orig) * 1.1 * ao * u_light;
+        col += u_rim_color * fres * u_rim;
+        lin = to_linear(grade(col));
+    }
     // opaque: alpha 1 occludes trails + background; transparent: emission
-    f_color = vec4(to_linear(grade(col)) * u_alpha, u_alpha >= 0.999 ? 1.0 : 0.0);
+    f_color = vec4(lin * u_alpha, u_alpha >= 0.999 ? 1.0 : 0.0);
+}
+"""
+
+# Wireframe: each edge is expanded into a screen-aligned quad (geometry
+# shader) of a chosen pixel width with an anti-aliased falloff — core-profile
+# GL lines are 1 px and aliased. Edges on the far side are dimmed (depth cue).
+WIRE_GS = """
+#version 330
+layout(lines) in;
+layout(triangle_strip, max_vertices = 4) out;
+uniform vec2  u_viewport;     // px
+uniform float u_width;        // px
+in vec3 v_normal[];
+in vec3 v_color[];
+out vec3  g_normal;
+out vec3  g_color;
+out float g_d;                // signed distance across the line, in px
+void main() {
+    vec4 p0 = gl_in[0].gl_Position, p1 = gl_in[1].gl_Position;
+    if (p0.w <= 0.0 || p1.w <= 0.0) return;
+    vec2 s0 = p0.xy / p0.w * u_viewport * 0.5;
+    vec2 s1 = p1.xy / p1.w * u_viewport * 0.5;
+    vec2 dir = s1 - s0;
+    float len = length(dir);
+    dir = len > 1e-4 ? dir / len : vec2(1.0, 0.0);
+    float hw = u_width * 0.5 + 1.0;          // +1 px for the AA ramp
+    vec2 off = vec2(-dir.y, dir.x) * hw / (u_viewport * 0.5);
+    for (int i = 0; i < 2; i++) {
+        vec4 p = i == 0 ? p0 : p1;
+        g_normal = v_normal[i];
+        g_color = v_color[i];
+        g_d = hw;
+        gl_Position = p + vec4(off * p.w, 0.0, 0.0);
+        EmitVertex();
+        g_d = -hw;
+        gl_Position = p - vec4(off * p.w, 0.0, 0.0);
+        EmitVertex();
+    }
+    EndPrimitive();
 }
 """
 
@@ -427,15 +550,22 @@ uniform float u_rim;
 uniform vec3  u_rim_color;
 uniform float u_wire_gain;    // per-model: dense meshes are dimmed
 uniform float u_emit;
-in vec3  v_normal;
-in vec3  v_color;
+uniform float u_width;
+uniform float u_light;
+in vec3  g_normal;
+in vec3  g_color;
+in float g_d;
 out vec4 f_color;
 """ + _MESH_GRADE_GLSL + _LINEAR_GLSL + """
 void main() {
-    float facing = abs(normalize(v_normal).z);
-    vec3 col = v_color * (0.45 + 0.55 * facing);
+    float cov = clamp(u_width * 0.5 + 0.5 - abs(g_d), 0.0, 1.0);
+    if (cov <= 0.0) discard;
+    vec3 n = normalize(g_normal);
+    float facing = abs(n.z);
+    float front = n.z >= 0.0 ? 1.0 : 0.35;   // far side of the model dimmer
+    vec3 col = g_color * (0.45 + 0.55 * facing) * front;
     col += u_rim_color * pow(1.0 - facing, 2.0) * u_rim * 0.5;
-    f_color = vec4(to_linear(grade(col)) * u_wire_gain * u_emit, 0.0);
+    f_color = vec4(to_linear(grade(col)) * cov * u_wire_gain * u_emit * u_light, 0.0);
 }
 """
 
@@ -732,6 +862,7 @@ class GLRenderer:
                 self.mesh_prog = ctx.program(vertex_shader=MESH_VS,
                                              fragment_shader=SURFACE_FS)
                 self.wire_prog = ctx.program(vertex_shader=MESH_VS,
+                                             geometry_shader=WIRE_GS,
                                              fragment_shader=WIRE_FS)
             except Exception as e:
                 print(f"[warning] mesh shaders failed ({e}); models as points only")
@@ -982,6 +1113,9 @@ class GLRenderer:
         """Camera zoom: >1 gets closer, <1 pulls back."""
         z = max(zoom, 0.05)
         self._view = _translate(0.0, 0.0, -self.cam_dist / z)
+        for prog in self._model_progs:
+            if "u_view_d" in prog._members:
+                prog["u_view_d"].value = float(self.cam_dist / z)
 
     def draw_grid(self):
         """Draw the static world grid into the accumulation buffer."""
@@ -1029,12 +1163,18 @@ class GLRenderer:
                     prog[name].value = float(val)
 
     def set_model_look(self, matcap=0, rim=1.0, rim_hue=0.52, orig=0.5,
-                       transparent=False):
-        """T19: surface look of the 3D model (matcap, fresnel rim, colors)."""
+                       transparent=False, shading=0, roughness=0.4, metal=0.0,
+                       ao=1.0, wire_width=1.2, light=1.0):
+        """T19: surface look of the 3D model (studio PBR or matcap, cavity
+        occlusion, fresnel rim, colors, wireframe line width in logical px)."""
         rim_color = colorsys.hsv_to_rgb(rim_hue % 1.0, 0.65, 1.0)
+        self._wire_width = float(wire_width)
         for prog in self._model_progs:
             for name, val in (("u_rim", float(rim)), ("u_rim_color", rim_color),
-                              ("u_orig", float(orig))):
+                              ("u_orig", float(orig)), ("u_shading", int(shading)),
+                              ("u_rough", float(min(max(roughness, 0.03), 1.0))),
+                              ("u_metal", float(metal)), ("u_ao_amt", float(ao)),
+                              ("u_light", float(light))):
                 if name in prog._members:
                     prog[name].value = val
         self._matcap_idx = int(matcap) % max(len(self._matcaps), 1)
@@ -1134,10 +1274,17 @@ class GLRenderer:
                                ("sharp", self.wire_prog, m["sharp"])):
             if len(idx) == 0:
                 continue
-            # the wire program never reads uv (the compiler drops the attribute)
-            uv = "2f" if "in_uv" in prog._members else "2x4"
-            layout = [(vbo, f"3f 3f 3f 1f {uv}", "in_pos", "in_normal", "in_color",
-                       "in_band", *(("in_uv",) if uv == "2f" else ()))]
+            # attributes a program never reads are dropped by the compiler:
+            # skip them in the layout (uv and ao are surface-only)
+            names = ["in_pos", "in_normal", "in_color", "in_band"]
+            fmt = "3f 3f 3f 1f"
+            for name, n in (("in_uv", 2), ("in_ao", 1)):
+                if name in prog._members:
+                    fmt += f" {n}f"
+                    names.append(name)
+                else:
+                    fmt += f" {n}x4"
+            layout = [(vbo, fmt, *names)]
             ibo = ctx.buffer(np.ascontiguousarray(idx, dtype="u4").tobytes())
             vao = ctx.vertex_array(prog, layout, index_buffer=ibo,
                                    index_element_size=4)
@@ -1155,6 +1302,14 @@ class GLRenderer:
         names = ("u_time", "u_inflate", "u_mturb")
         for prog in (self.mesh_prog, self.wire_prog):
             self._write_frame_uniforms(prog, uniforms, names)
+        # line width in internal px; the additive brightness of a line grows
+        # with its width, so the gain is normalized to a 1.5 px reference
+        k = max(self.dpr, self.render_scale)
+        w_px = max(getattr(self, "_wire_width", 1.2) * k, 1.0)
+        self.wire_prog["u_width"].value = w_px
+        self.wire_prog["u_viewport"].value = tuple(float(v) for v in self._internal_size)
+        if "u_emit" in self.wire_prog._members:
+            self.wire_prog["u_emit"].value = EMISSION_GAIN * 1.5 / w_px
         ctx, fbo, vaos = self.ctx, self._accum, self._mesh_vaos
         fbo.use()
         self._matcaps[self._matcap_idx].use(0)

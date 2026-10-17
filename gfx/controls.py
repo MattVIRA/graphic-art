@@ -80,7 +80,10 @@ DEFAULTS = {
     "brightness":  1.0,    # pre-tonemap exposure         0.2 .. 2.5
     "bloom":       0.9,    # bloom intensity              0 .. 3
     "bloom_radius": 0.5,   # T6: 0 = glow serré, 1 = larges halos
-    "render_scale": 1.5,   # T6: super-échantillonnage interne (anti-aliasing)
+    "bloom_threshold": 0.8,  # luminance (linéaire) où le glow commence
+    "vignette":    0.25,   # assombrit les bords de l'image   0 .. 1
+    "render_scale": 1.5,   # T6: densité de rendu (px internes / px logique) ;
+                           # sans effet sur Retina (déjà 2×), MSAA 4× en plus
     "trail":       0.30,   # fade per frame (high = short trails)
     "point_size":  1.0,    # particle size multiplier
     "zoom":        1.0,    # camera zoom (also mouse wheel)   0.3 .. 3
@@ -96,12 +99,17 @@ DEFAULTS = {
     # ── Modèle 3D (T19) ──
     "model_style": 1.0,    # index in MODEL_STYLES (1 = Surface)
     "model_up":    0.0,    # index in visuals.mesh.UP_AXES
-    "matcap":      0.0,    # index in gfx.matcaps.NAMES
+    "shading":     0.0,    # index in SHADING_MODES (0 = Studio PBR)
+    "matcap":      0.0,    # index in gfx.matcaps.NAMES (shading = Matcap)
+    "roughness":   0.45,   # studio: 0 = miroir, 1 = mat
+    "metal":       0.0,    # studio: 0 = diélectrique, 1 = métal
+    "ao":          1.0,    # occlusion des creux (cavités)       0 .. 2
+    "wire_width":  1.2,    # épaisseur des traits du wireframe (px)
     "inflate":     0.0,    # constant inflation along the normals   0 .. 2
                            # (0 = model untouched; animate via Physique)
     "rim":         1.0,    # fresnel rim intensity                  0 .. 3
     "rim_hue":     0.52,   # rim color hue                          0 .. 1
-    "orig_color":  0.5,    # 0 = pure matcap, 1 = model colors
+    "orig_color":  1.0,    # 0 = gris neutre / matcap pur, 1 = couleurs du modèle
     "mesh_transparent": 0.0,   # surface drawn additive (hologram)
     "wire_sharp":  0.0,    # wireframe: sharp edges only
     "wire_hidden": 0.0,    # wireframe: hide the edges behind the surface
@@ -201,13 +209,19 @@ VIDEO_GROUPS = [
         ("Bloom",           "bloom",        0.0,  3.0, 0.05, None),
         ("Rayon bloom",     "bloom_radius", 0.0,  1.0, 0.05,
          "0 = glow serré, 1 = larges halos doux"),
+        ("Seuil bloom",     "bloom_threshold", 0.0, 2.0, 0.05,
+         "Seules les zones plus lumineuses que ce seuil\n"
+         "brillent (0 = tout l'écran glow, voile laiteux)"),
         ("Trainées (fade)", "trail",        0.05, 0.9, 0.01,
          "Effacement par frame : bas = longues trainées"),
     ]),
     ("Rendu", [
         ("Grain",             "grain",        0.0,  0.5, 0.01, None),
         ("Anti-aliasing (×)", "render_scale", 1.0,  2.0, 0.25,
-         "Super-échantillonnage interne (coût GPU)"),
+         "Densité de rendu (px internes par px).\nSans effet sur un écran Retina "
+         "(déjà 2×) :\nle MSAA 4× lisse les arêtes dans tous les cas"),
+        ("Vignette",          "vignette",     0.0,  1.0, 0.01,
+         "Assombrit doucement les bords de l'image"),
         ("Taille points",     "point_size",   0.3,  3.0, 0.05, None),
         ("Zoom",              "zoom",         0.3,  3.0, 0.05, None),
         ("Réactivité",        "reactivity",   0.25, 3.0, 0.05,
@@ -281,8 +295,19 @@ MODEL_SLIDERS = [
      "Liseré lumineux sur les bords (fresnel)"),
     ("Teinte du rim", "rim_hue", 0.0, 1.0, 0.01, None),
     ("Couleur d'origine", "orig_color", 0.0, 1.0, 0.05,
-     "Surface : 0 = matcap pur,\n1 = couleurs du modèle éclairées"),
+     "Surface : 0 = gris neutre (studio) / matcap pur,\n"
+     "1 = couleurs du modèle éclairées"),
+    ("Rugosité", "roughness", 0.05, 1.0, 0.01,
+     "Studio : 0 = reflets nets (vernis, chrome),\n1 = mat (argile, plâtre)"),
+    ("Métal", "metal", 0.0, 1.0, 0.01,
+     "Studio : 1 = les reflets prennent la couleur\ndu modèle (or, cuivre…)"),
+    ("Occlusion des creux", "ao", 0.0, 2.0, 0.05,
+     "Assombrit les plis et cavités → volume, détails"),
+    ("Épaisseur traits", "wire_width", 0.5, 4.0, 0.1,
+     "Wireframe : largeur des arêtes en pixels"),
 ]
+
+SHADING_MODES = ["Studio (PBR)", "Matcap"]
 
 IMPORT_TYPES = [
     ("Images et modèles 3D",
@@ -806,8 +831,11 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
               "Wireframe : arêtes du maillage")
     add_combo(grp_model, "Axe haut", "model_up", MESH_UP_AXES,
               "Les STL et les scans sont souvent en Z-up")
+    add_combo(grp_model, "Éclairage", "shading", SHADING_MODES,
+              "Studio : lumières + reflets physiques (rugosité, métal)\n"
+              "Matcap : sphère pré-éclairée (look stylisé)")
     add_combo(grp_model, "Matcap", "matcap", MATCAP_NAMES,
-              "Éclairage studio de la surface")
+              "Utilisé quand l'éclairage est en mode Matcap")
     add_check(grp_model, "Surface transparente (hologramme)",
               "mesh_transparent", pady=(8, 0))
     add_check(grp_model, "Wireframe : arêtes vives seulement", "wire_sharp",

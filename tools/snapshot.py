@@ -55,9 +55,14 @@ def render_scene(ctx, renderer, particles, p, level, frames=45):
         f = features(level, t)
         rp = particles.gpu_uniforms(f, dict(p, model_turb=0.0, fx_rot=0.0),
                                     time_s=t)
-        renderer.set_model_look(matcap=p["matcap"], rim=p["rim"],
-                                rim_hue=p["rim_hue"], orig=p["orig_color"],
-                                transparent=False)
+        look = dict(matcap=p["matcap"], rim=p["rim"], rim_hue=p["rim_hue"],
+                    orig=p["orig_color"], transparent=False)
+        if "shading" in p:      # studio PBR controls (newer renderer)
+            look.update(shading=p["shading"], roughness=p["roughness"],
+                        metal=p["metal"], ao=p["ao"], wire_width=p["wire_width"])
+        renderer.set_model_look(**look)
+        renderer.bloom_threshold = p.get("bloom_threshold", 0.8)
+        renderer.vignette = p.get("vignette", 0.0)
         renderer.set_zoom(p["zoom"])
         deg = np.pi / 180.0
         renderer.set_transform(0.6 + t * 0.4, rp["scale"],

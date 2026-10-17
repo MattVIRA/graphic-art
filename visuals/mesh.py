@@ -185,6 +185,7 @@ def _build_render(parts):
         colors = colors[idx]
 
     edges = m.edges_unique
+    ao = _cavity(np.asarray(m.vertices), np.asarray(m.vertex_normals), edges)
     # sharp edges: dihedral angle above the threshold + open boundaries
     sharp = m.face_adjacency_edges[m.face_adjacency_angles > SHARP_ANGLE]
     from trimesh.grouping import group_rows
@@ -197,6 +198,7 @@ def _build_render(parts):
         return {
             "v": np.asarray(V, dtype=np.float64),
             "n": np.asarray(m.vertex_normals, dtype=np.float32)[inv],
+            "ao": ao[inv],
             "c": colors0.astype(np.float32),
             "uv": np.concatenate(uvs).astype(np.float32),
             "tex": (np.clip(tex_part.tex, 0.0, 1.0) * 255).astype(np.uint8),
@@ -207,6 +209,7 @@ def _build_render(parts):
     return {
         "v": np.asarray(m.vertices, dtype=np.float64),
         "n": np.asarray(m.vertex_normals, dtype=np.float32),
+        "ao": ao,
         "c": colors.astype(np.float32),
         "uv": None,
         "tex": None,
@@ -214,6 +217,36 @@ def _build_render(parts):
         "edges": np.asarray(edges, dtype=np.uint32),
         "sharp": np.asarray(sharp, dtype=np.uint32),
     }
+
+
+def _cavity(v: np.ndarray, n: np.ndarray, edges: np.ndarray,
+            smooth_iters: int = 4) -> np.ndarray:
+    """Per-vertex cavity occlusion in [0, 1] (1 = open, lower = crease).
+
+    For each vertex, the mean of dot(normal, direction to each neighbour):
+    neighbours rising above the tangent plane mean a concave spot (folds,
+    eye sockets, between fingers). Smoothed over the 1-ring a few times so
+    the darkening spreads like ambient occlusion; normalized per model."""
+    a, b = edges[:, 0], edges[:, 1]
+    d = v[b] - v[a]
+    d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-12
+    acc = np.zeros(len(v))
+    cnt = np.zeros(len(v))
+    np.add.at(acc, a, np.einsum("ij,ij->i", n[a], d))
+    np.add.at(acc, b, -np.einsum("ij,ij->i", n[b], d))
+    np.add.at(cnt, a, 1.0)
+    np.add.at(cnt, b, 1.0)
+    cav = acc / np.maximum(cnt, 1.0)
+    for _ in range(smooth_iters):
+        s = np.zeros(len(v))
+        np.add.at(s, a, cav[b])
+        np.add.at(s, b, cav[a])
+        cav = 0.5 * cav + 0.5 * s / np.maximum(cnt, 1.0)
+    concave = np.maximum(cav, 0.0)
+    hi = float(np.percentile(concave, 98)) if len(concave) else 0.0
+    if hi <= 1e-6:
+        return np.ones(len(v), dtype=np.float32)
+    return (1.0 - np.clip(concave / hi, 0.0, 1.0) * 0.85).astype(np.float32)
 
 
 def load_model(path: str) -> RawModel:
@@ -328,17 +361,19 @@ def point_gain(raw: RawModel, radius: float, n: int) -> float:
 
 def build_mesh(raw: RawModel, up: int, radius: float):
     """Buffers for the surface / wireframe programs, or None (point cloud):
-    dict(verts (V,10) f4 [pos3, normal3, color3, band], tris, edges, sharp)."""
+    dict(verts (V,13) f4 [pos3, normal3, color3, band, uv2, ao], tris, edges,
+    sharp)."""
     r = raw.render
     if r is None:
         return None
     pos = _place(raw, r["v"], up, radius)
-    verts = np.empty((len(pos), 12), dtype=np.float32)
+    verts = np.empty((len(pos), 13), dtype=np.float32)
     verts[:, 0:3] = pos
     verts[:, 3:6] = _orient(r["n"], up)
     verts[:, 6:9] = r["c"]
     verts[:, 9] = _bands(pos)
     verts[:, 10:12] = r["uv"] if r["uv"] is not None else NO_UV
+    verts[:, 12] = r["ao"]
     # additive lines: dense meshes (short edges) would burn to white
     e = r["edges"]
     mean_len = float(np.linalg.norm(pos[e[:, 0]] - pos[e[:, 1]], axis=1).mean())

@@ -487,6 +487,8 @@ def main():
         renderer.fade = p["trail"] * max(0.12, 1.0 - min(fx["Trainées"], 1.2) * 0.75)
         renderer.bloom_intensity = p["bloom"]
         renderer.bloom_radius = p["bloom_radius"]
+        renderer.bloom_threshold = p["bloom_threshold"]
+        renderer.vignette = p["vignette"]
         renderer.set_render_scale(p["render_scale"])
         renderer.set_size_mult(p["point_size"] * (1.0 + fx["Taille points"] * 0.6))
         sh = 0.012
@@ -553,7 +555,10 @@ def main():
                 and renderer.has_mesh):
             renderer.set_model_look(matcap=p["matcap"], rim=p["rim"],
                                     rim_hue=p["rim_hue"], orig=p["orig_color"],
-                                    transparent=p["mesh_transparent"] >= 0.5)
+                                    transparent=p["mesh_transparent"] >= 0.5,
+                                    shading=p["shading"], roughness=p["roughness"],
+                                    metal=p["metal"], ao=p["ao"],
+                                    wire_width=p["wire_width"])
             renderer.draw_model_mesh(rp, model_style,
                                      sharp_only=p["wire_sharp"] >= 0.5,
                                      hide_hidden=p["wire_hidden"] >= 0.5)
