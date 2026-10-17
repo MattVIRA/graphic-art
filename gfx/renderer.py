@@ -968,10 +968,11 @@ class GLRenderer:
         if self.output_fbo is not None:
             return self.output_fbo
         if self._screen is None:
-            # re-detect the default framebuffer (its size changes with the
-            # window) and force its viewport: detect_framebuffer can report a
+            # re-detect the window's default framebuffer (glo 0: without it,
+            # detect_framebuffer() returns whatever FBO is bound right now,
+            # e.g. a bloom level) and force its viewport: it can report a
             # stale size inherited from the previous GL viewport
-            self._screen = self.ctx.detect_framebuffer()
+            self._screen = self.ctx.detect_framebuffer(0)
             self._screen.viewport = (0, 0, int(round(self.w * self.dpr)),
                                      int(round(self.h * self.dpr)))
         return self._screen
