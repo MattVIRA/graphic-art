@@ -127,7 +127,10 @@ DEFAULTS = {
 
 # ── Physique : routing bandes de fréquences → effets ──────────────────
 EQ_BANDS = ["SUB", "BASS", "LOW MID", "MID", "HIGH MID", "PRESENCE", "TREBLE",
-            "BEAT"]   # BEAT = impulsion sur chaque beat, décroissante (T2)
+            "BEAT",     # impulsion sur chaque beat, décroissante (T2)
+            "KICK",     # ressort amorti lancé par chaque grosse caisse (rebond)
+            "SNARE",    # impulsion courte sur caisse claire / clap
+            "ÉNERGIE"]  # énergie de la section : ~0 dans les breaks, ~1 sur un drop
 
 EFFECTS = [
     "Aucun",
@@ -141,12 +144,17 @@ EFFECTS = [
     "Luminosité",
     "Taille points",
     "Gonflement",     # T19: 3D model inflation along the normals
+    "Lumière",        # 3D model: intensity of the studio lights
+    "Rim",            # 3D model: fresnel rim boost
+    "Secousse caméra",
 ]
 
 # Effects that can target the subject or the background only (per-particle);
 # the others (chromatic shifts, trails, zoom, rotation) are full-frame.
 SCOPABLE_EFFECTS = {"Taille points", "Luminosité", "Turbulence"}
 PHYS_SCOPE_OPTIONS = ["Tout", "Objet", "Décor"]
+
+DEFAULTS["dynamics"] = 0.0   # 0 = off, 1 = effets très calmes dans les breaks
 
 for _i in range(len(EQ_BANDS)):
     DEFAULTS[f"band{_i}_fx"] = 0.0    # effect index in EFFECTS (0 = Aucun)
@@ -186,6 +194,15 @@ PHYSICS_PRESETS = {
         1: ("Zoom (pulse)", 1.0),        # BASS
         5: ("Turbulence", 1.0),          # PRESENCE
         6: ("Décalage bleu", 0.8),       # TREBLE
+    }),
+    # 3D model, "music video" look: the kick makes the model breathe with a
+    # spring rebound, the snare flashes the rim, the section drives the lights
+    "Studio": _preset({
+        0: ("Zoom (pulse)", 0.25),       # SUB
+        4: ("Vitesse rotation", 0.6),    # HIGH MID
+        8: ("Gonflement", 0.6),          # KICK
+        9: ("Rim", 1.0),                 # SNARE
+        10: ("Lumière", 0.7),            # ÉNERGIE
     }),
     "Drum machine": _preset({
         0: ("Zoom (pulse)", 1.5),        # SUB
@@ -890,6 +907,10 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
               text="Chaque bande de fréquence pilote\nl'effet de son choix.",
               style="Muted.TLabel", justify="left"
               ).pack(anchor="w", padx=14, pady=(10, 4))
+    build_slider(tab_phys, "Dynamique (breaks → drops)", "dynamics", 0.0, 1.0,
+                 0.05, "Atténue tous les effets dans les passages calmes\n"
+                       "et les libère sur les drops (bande ÉNERGIE).\n0 = off")\
+        .pack(fill="x", padx=14, pady=(2, 4))
 
     VU_W, VU_H = 12, 46
     vu_canvases = []   # (canvas, bar item) per band

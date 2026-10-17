@@ -68,6 +68,15 @@ class LiveAnalyzer:
         self._last_evt = 0.0
         self._density_peak = 1e-6
         self._transients = 0.0
+        # percussive hits (spectral flux of a band vs its running mean)
+        self._hit_masks = {"kick": (freqs >= 30) & (freqs < 150),
+                           "snare": (freqs >= 1500) & (freqs < 8000)}
+        self._hit_state = {k: {"prev": 0.0, "mean": 1e-6, "last": 0.0,
+                               "id": 0, "amp": 0.0} for k in self._hit_masks}
+        # section energy: slow RMS envelope against a slow min / max
+        self._sec = 0.0
+        self._sec_lo = None
+        self._sec_hi = 1e-6
 
         channels = 1
         try:
@@ -248,6 +257,33 @@ class LiveAnalyzer:
             f["beat_phase"] = 0.0
             f["bpm"] = 0.0
         f["is_onset"] = bool(self._events and now - self._events[-1] < 0.05)
+
+        # percussive hits: band flux well above its running mean, with a
+        # refractory period (kick 120 ms, snare 90 ms)
+        for key, refract in (("kick", 0.12), ("snare", 0.09)):
+            st = self._hit_state[key]
+            e = float(spec[self._hit_masks[key]].mean()) if not silent else 0.0
+            flux = max(0.0, e - st["prev"])
+            st["prev"] = e
+            st["mean"] += 0.05 * (flux - st["mean"])
+            if (not silent and flux > st["mean"] * 2.5 and flux > 1e-5
+                    and now - st["last"] > refract):
+                st["last"] = now
+                st["id"] += 1
+                st["amp"] = min(1.0, self._norm(key + "_flux", flux, 0.999))
+            f[key + "_id"] = st["id"]
+            f[key + "_amp"] = st["amp"]
+
+        # section energy (~3 s at 60 fps), stretched between a slow floor and
+        # a slow ceiling → ~0 in breaks, ~1 on drops
+        self._sec += 0.005 * (raw_rms - self._sec)
+        if self._sec_lo is None:
+            self._sec_lo = self._sec
+        self._sec_lo = min(self._sec, self._sec_lo + (self._sec - self._sec_lo) * 0.0005)
+        self._sec_hi = max(self._sec, self._sec_hi * 0.9997)
+        f["section"] = float(np.clip((self._sec - self._sec_lo)
+                                     / (self._sec_hi - self._sec_lo + 1e-6), 0.0, 1.0)) \
+            if not silent else 0.0
         f["frame_idx"] = 0
         f["waveform"] = buf
         return f

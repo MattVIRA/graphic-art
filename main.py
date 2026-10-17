@@ -17,6 +17,7 @@ the audio playback (mixer) and the HUD font.
 """
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -81,6 +82,29 @@ class Envelope:
             new = prev + (v - prev) * k
         self._state[key] = new
         return new
+
+
+class Spring:
+    """Damped oscillator kicked by impulses: snaps out, overshoots a little
+    and settles — an elastic response instead of a linear follow."""
+
+    def __init__(self, freq_hz: float = 3.0, damping: float = 0.35):
+        self.w = 2.0 * math.pi * freq_hz
+        self.z = damping
+        self.x = self.v = 0.0
+
+    def kick(self, amount: float):
+        # velocity such that the first peak ≈ amount
+        self.v += amount * self.w * 1.5
+
+    def step(self, dt: float) -> float:
+        n = max(1, int(dt / 0.004))          # stable sub-steps
+        h = dt / n
+        for _ in range(n):
+            a = -self.w * self.w * self.x - 2.0 * self.z * self.w * self.v
+            self.v += a * h
+            self.x += self.v * h
+        return self.x
 
 
 SMOOTHED_KEYS = ("bass", "low_mid", "mid", "high",
@@ -244,6 +268,8 @@ def main():
         "bpm": 0.0, "beat_phase": 0.0,
         "spectrum": __import__("numpy").zeros(AudioAnalyzer.N_MELS, dtype="f4"),
         "eq_bands": __import__("numpy").zeros(7, dtype="f4"),
+        "kick_id": 0, "kick_amp": 0.0, "snare_id": 0, "snare_amp": 0.0,
+        "section": 0.0,
     }
 
     def stop_source():
@@ -324,6 +350,9 @@ def main():
     axis_precession = 0.0   # accumulated axis spin around the world vertical
     beat_env = 0.0          # beat flash envelope (spikes on beat, fast decay)
     envelope = Envelope()   # T4: attack/release smoothing of the features
+    kick_spring = Spring()  # KICK band: elastic response to each kick
+    last_kick = last_snare = 0
+    snare_env = 0.0
     next_monitor = 0.0      # T8: next time a monitoring packet is due
     budget_wanted, budget_t = None, 0.0   # debounced n_points rebuild
     hud_next = 0.0          # next HUD text refresh
@@ -417,18 +446,36 @@ def main():
         else:
             beat_env *= 0.86
 
+        # ── percussive layer: kick spring, snare flash, section energy ──
+        kid, sid = features.get("kick_id", 0), features.get("snare_id", 0)
+        if kid != last_kick:
+            if kid > last_kick:
+                kick_spring.kick(features.get("kick_amp", 0.0))
+            last_kick = kid
+        if sid != last_snare:
+            if sid > last_snare:
+                snare_env = max(snare_env, features.get("snare_amp", 0.0))
+            last_snare = sid
+        kick_x = kick_spring.step(dt)
+        snare_env *= math.exp(-dt / 0.12)
+        section = float(envelope.smooth("section", features.get("section", 0.0),
+                                        dt, 0.15))
+
         # ── Physics routing: each EQ band drives its chosen effect ──
         fx = {name: 0.0 for name in EFFECTS}
-        # 8th band "BEAT": 1.0 on the beat, decaying to 0 until the next one
+        # "BEAT": 1.0 on the beat, decaying to 0 until the next one
         beat_pulse = ((1.0 - features.get("beat_phase", 0.0)) ** 2
                       if features.get("bpm", 0.0) > 0 else 0.0)
-        bands = list(features["eq_bands"]) + [beat_pulse]
+        bands = list(features["eq_bands"]) + [beat_pulse, kick_x, snare_env,
+                                              section]
+        # macro-dynamics: every routed effect is damped in calm sections
+        dyn_gain = 1.0 - p.get("dynamics", 0.0) * 0.75 * (1.0 - section)
         # scopable effects can target the subject (fx_fg) or the décor (fx_bg)
         fx_fg = {name: 0.0 for name in SCOPABLE_EFFECTS}
         fx_bg = {name: 0.0 for name in SCOPABLE_EFFECTS}
         for i in range(len(EQ_BANDS)):
             eff = EFFECTS[int(p[f"band{i}_fx"])]
-            val = float(bands[i]) * p[f"band{i}_amt"]
+            val = float(bands[i]) * p[f"band{i}_amt"] * dyn_gain
             sc_i = int(p.get(f"band{i}_scope", 0.0))
             if eff in SCOPABLE_EFFECTS and sc_i == 1:
                 fx_fg[eff] += val
@@ -537,7 +584,12 @@ def main():
         if p["axis_spin"] >= 0.5:
             axis_precession += p["axis_spin_speed"] * deg * clock.dt
 
-        renderer.set_zoom(p["zoom"] * wheel_zoom)   # before set_transform (view matrix)
+        t_now = glfw.get_time()
+        sk = fx["Secousse caméra"] * 14.0
+        shake = (sk * 0.5 * (math.sin(t_now * 23.1) + math.sin(t_now * 31.7 + 1.3)),
+                 sk * 0.5 * (math.sin(t_now * 27.3 + 0.7) + math.sin(t_now * 19.9)))
+        # before set_transform (view matrix)
+        renderer.set_zoom(p["zoom"] * wheel_zoom, shake)
         renderer.set_transform(
             rp["angle"], rp["scale"],
             axis_tilt=p["axis_tilt"] * deg,
@@ -551,19 +603,21 @@ def main():
         if p["show_axis"] >= 0.5:
             renderer.draw_axis()
         model_style = int(p["model_style"])   # 0 points, 1 surface, 2 wireframe
+        rim = p["rim"] + max(fx["Rim"], 0.0) * 1.5
+        light = max(0.15, 1.0 + fx["Lumière"] * 0.8)
         if (particles.mode == "model" and model_style > 0
                 and renderer.has_mesh):
-            renderer.set_model_look(matcap=p["matcap"], rim=p["rim"],
+            renderer.set_model_look(matcap=p["matcap"], rim=rim,
                                     rim_hue=p["rim_hue"], orig=p["orig_color"],
                                     transparent=p["mesh_transparent"] >= 0.5,
                                     shading=p["shading"], roughness=p["roughness"],
                                     metal=p["metal"], ao=p["ao"],
-                                    wire_width=p["wire_width"])
+                                    wire_width=p["wire_width"], light=light)
             renderer.draw_model_mesh(rp, model_style,
                                      sharp_only=p["wire_sharp"] >= 0.5,
                                      hide_hidden=p["wire_hidden"] >= 0.5)
         elif renderer.gpu_prog is not None:
-            renderer.set_model_look(rim=p["rim"], rim_hue=p["rim_hue"])
+            renderer.set_model_look(rim=rim, rim_hue=p["rim_hue"], light=light)
             renderer.draw_particles_gpu(rp)
         else:
             renderer.draw_particles(out, count)

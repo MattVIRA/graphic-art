@@ -94,6 +94,21 @@ class AudioAnalyzer:
             density[i] = density[i - 1] + alpha * (density[i] - density[i - 1])
         self.transient_density = density
 
+        # Percussive hits for the "choreographed" layer: kick = onsets of the
+        # low band, snare/clap = onsets of the upper mids. Each frame carries
+        # the id and strength of the latest hit, so the 60 fps render loop
+        # never misses one even if it skips analysis frames.
+        n = D.shape[1]
+        self.kick_id, self.kick_amp = self._hits(D, freqs, sr, hl, 30, 150, wait=8)
+        self.snare_id, self.snare_amp = self._hits(D, freqs, sr, hl, 1500, 8000, wait=5)
+
+        # Section energy: RMS averaged over ~4 s, stretched to the track's own
+        # range → ~0 in breaks / intros, ~1 on drops (macro-dynamics)
+        k = max(1, int(4.0 * sr / hl))
+        slow = np.convolve(rms, np.ones(k) / k, mode="same")
+        lo, hi = np.percentile(slow, 5), np.percentile(slow, 95)
+        self.section = np.clip((slow - lo) / (hi - lo + 1e-8), 0.0, 1.0).astype(np.float32)
+
         # Spectral centroid normalized to [0, 1]
         centroid = librosa.feature.spectral_centroid(y=y, sr=sr, n_fft=self.n_fft, hop_length=hl)[0]
         self.centroid = centroid / (sr / 2.0)
@@ -105,6 +120,24 @@ class AudioAnalyzer:
         self.mel_norm = (mel_db - lo) / (hi - lo + 1e-8)
 
         self.n_frames = self.mel_norm.shape[1]
+
+    @staticmethod
+    def _hits(D, freqs, sr, hl, fmin, fmax, wait):
+        """(id, amp) per frame: running count of onsets in [fmin, fmax] Hz and
+        the normalized strength of the most recent one (log spectral flux)."""
+        band = np.log1p(D[(freqs >= fmin) & (freqs < fmax), :] * 10.0)
+        n = D.shape[1]
+        env = np.zeros(n, dtype=np.float32)
+        env[1:] = np.maximum(np.diff(band, axis=1), 0.0).sum(axis=0)
+        env /= env.max() + 1e-8
+        peaks = librosa.onset.onset_detect(onset_envelope=env, sr=sr,
+                                           hop_length=hl, delta=0.1, wait=wait)
+        if len(peaks) == 0:
+            return np.zeros(n, dtype=np.int32), np.zeros(n, dtype=np.float32)
+        strength = env[peaks] / (np.percentile(env[peaks], 90) + 1e-8)
+        last = np.searchsorted(peaks, np.arange(n), side="right") - 1
+        amp = np.where(last >= 0, np.clip(strength, 0.0, 1.0)[last], 0.0)
+        return (last + 1).astype(np.int32), amp.astype(np.float32)
 
     # ------------------------------------------------------------------
     # Public
@@ -132,6 +165,11 @@ class AudioAnalyzer:
             "centroid": float(self.centroid[i]),
             "spectrum": self.mel_norm[:, i].copy(),   # shape (N_MELS,)
             "eq_bands": self.eq_bands[:, i].copy(),   # shape (7,) SUB→TREBLE
+            "kick_id":  int(self.kick_id[i]),
+            "kick_amp": float(self.kick_amp[i]),
+            "snare_id": int(self.snare_id[i]),
+            "snare_amp": float(self.snare_amp[i]),
+            "section":  float(self.section[min(i, len(self.section) - 1)]),
             "frame_idx": i,
         }
 

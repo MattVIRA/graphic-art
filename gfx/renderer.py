@@ -1109,10 +1109,11 @@ class GLRenderer:
         p["u_grain"].value = float(grain)
         p["u_time"].value = float(time)
 
-    def set_zoom(self, zoom: float):
-        """Camera zoom: >1 gets closer, <1 pulls back."""
+    def set_zoom(self, zoom: float, shake=(0.0, 0.0)):
+        """Camera zoom: >1 gets closer, <1 pulls back. shake: small camera
+        offset (px) for the routed « Secousse caméra » effect."""
         z = max(zoom, 0.05)
-        self._view = _translate(0.0, 0.0, -self.cam_dist / z)
+        self._view = _translate(shake[0], shake[1], -self.cam_dist / z)
         for prog in self._model_progs:
             if "u_view_d" in prog._members:
                 prog["u_view_d"].value = float(self.cam_dist / z)
