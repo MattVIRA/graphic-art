@@ -41,14 +41,6 @@ def _translate(tx, ty, tz):
     return M
 
 
-def _rotate_y(a):
-    c, s = np.cos(a), np.sin(a)
-    M = np.eye(4, dtype=np.float64)
-    M[0, 0], M[0, 2] = c, s
-    M[2, 0], M[2, 2] = -s, c
-    return M
-
-
 def _rotate_x(a):
     c, s = np.cos(a), np.sin(a)
     M = np.eye(4, dtype=np.float64)
@@ -940,12 +932,6 @@ class GLRenderer:
         lights live in camera space: they follow the camera, like the
         default solid view of a 3D package."""
         self._view = np.asarray(view, dtype=np.float64)
-
-    def set_zoom(self, zoom: float, shake=(0.0, 0.0)):
-        """Fixed front camera (no orbit): >1 gets closer, <1 pulls back.
-        shake: small screen offset (px), « Secousse caméra »."""
-        z = max(zoom, 0.05)
-        self.set_view(_translate(shake[0], shake[1], -self.cam_dist / z))
 
     def draw_grid(self):
         """Draw the static world grid into the accumulation buffer."""
