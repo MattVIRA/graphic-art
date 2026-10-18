@@ -23,7 +23,17 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Le détourage d'image télécharge ses modèles (rembg) au premier usage.
+Pour développer : outils qualité (ruff, pytest, pre-commit) et contrôle
+automatique à chaque `git commit` :
+
+```bash
+pip install -r requirements-dev.txt
+pre-commit install
+```
+
+`ruff check .` vérifie le style et la gestion des exceptions (lint seulement,
+pas de reformatage) ; `pytest` lance les tests (`-m "not slow"` pour sauter
+les tests lents).
 
 ## Utilisation
 
@@ -59,6 +69,7 @@ visuals/       particules, chargement des modèles 3D
 gfx/           rendu moderngl, panneau tkinter, matcaps
 presets.default.json   presets de départ (presets.json, local, n'est pas versionné)
 tests/         tests pytest
+pyproject.toml           règles ruff ; .pre-commit-config.yaml : contrôle au commit
 ```
 
 `audio/` ne connaît ni `visuals/` ni `gfx/` : `main.py` fait le lien.

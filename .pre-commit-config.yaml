@@ -1,0 +1,17 @@
+# Contrôles au moment du `git commit` (T25) — activés une fois par
+# `pre-commit install`. Hooks locaux : même ruff que le venv et que les
+# hooks Claude Code, rien à télécharger. En urgence : git commit --no-verify.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff (lint)
+        entry: .venv/bin/ruff check --force-exclude
+        language: system
+        types: [python]
+      - id: pytest
+        name: pytest (tous les tests, ~3 s)
+        entry: .venv/bin/python -m pytest -q
+        language: system
+        types: [python]
+        pass_filenames: false

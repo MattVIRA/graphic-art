@@ -1,0 +1,19 @@
+# Outillage qualité (T25). Lint seulement : pas de `ruff format`, qui
+# réécrirait ~45 % des lignes et casserait les commentaires alignés.
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# modules legacy, plus importés nulle part — supprimés par T22
+extend-exclude = ["visuals/effects.py", "visuals/spectrum.py", "visuals/waveform.py"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle + pyflakes (PEP8, noms inutilisés…)
+    "I",             # tri des imports
+    "B",             # bugbear : pièges courants (dont B904, raise sans from)
+    "E722",          # except nu
+    "BLE001",        # except Exception : seulement aux frontières, avec # noqa justifié
+    "S110", "S112",  # except … : pass / continue silencieux
+]
+# À activer avec le logging de T22 : T201 (print), TRY400, C901, ERA001
