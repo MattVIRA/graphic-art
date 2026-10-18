@@ -21,11 +21,7 @@ class LiveAnalyzer:
     N_FFT = 2048
 
     # (lo, hi) Hz — must match AudioAnalyzer
-    _BANDS = {
-        "bass": (20, 250), "low_mid": (250, 800), "mid": (800, 4000),
-        "high": (4000, 20000), "hz_10_11": (10000, 11000),
-        "hz_11_12": (11000, 12000), "hz_12_14": (12000, 14000),
-    }
+    _BANDS = {"bass": (20, 250), "high": (4000, 20000)}
     _EQ_EDGES = [(20, 60), (60, 250), (250, 800), (800, 2500),
                  (2500, 6000), (6000, 10000), (10000, 16000)]
 
@@ -42,7 +38,6 @@ class LiveAnalyzer:
         self._mel_fb = librosa.filters.mel(
             sr=sr, n_fft=self.N_FFT, n_mels=self.N_MELS).astype(np.float32)
         freqs = np.fft.rfftfreq(self.N_FFT, 1.0 / sr)
-        self._freqs = freqs
         self._masks = {k: (freqs >= lo) & (freqs < hi)
                        for k, (lo, hi) in self._BANDS.items()}
         self._eq_masks = [(freqs >= lo) & (freqs < hi) for lo, hi in self._EQ_EDGES]
@@ -207,11 +202,6 @@ class LiveAnalyzer:
             f[key] = self._norm(key, v) if not silent else 0.0
         f["rms"] = self._norm("rms", raw_rms) if not silent else 0.0
 
-        # spectral centroid → hue drive
-        total = spec.sum() + 1e-8
-        f["centroid"] = float((self._freqs * spec).sum() / total / (self.sr / 2.0)) \
-            if not silent else 0.0
-
         # mel spectrum, normalized per-frame then gated by level
         if silent:
             f["spectrum"] = np.zeros(self.N_MELS, dtype=np.float32)
@@ -257,7 +247,6 @@ class LiveAnalyzer:
             f["is_beat"] = False
             f["beat_phase"] = 0.0
             f["bpm"] = 0.0
-        f["is_onset"] = bool(self._events and now - self._events[-1] < 0.05)
 
         # percussive hits: band flux well above its running mean, with a
         # refractory period (kick 120 ms, snare 90 ms)
@@ -286,5 +275,4 @@ class LiveAnalyzer:
                                      / (self._sec_hi - self._sec_lo + 1e-6), 0.0, 1.0)) \
             if not silent else 0.0
         f["frame_idx"] = 0
-        f["waveform"] = buf
         return f

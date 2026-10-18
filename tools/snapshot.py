@@ -41,10 +41,9 @@ def features(level: float, t: float) -> dict:
     eq = np.array([kick, kick * 0.8, level * 0.5, level * 0.5,
                    level * 0.4, level * 0.3, level * 0.3], dtype="f4")
     return {
-        "bass": kick, "low_mid": level * 0.5, "mid": level * 0.5, "high": level * 0.3,
-        "hz_10_11": level * 0.2, "hz_11_12": level * 0.2, "hz_12_14": level * 0.2,
-        "rms": level * 0.6, "transients": level * 0.3, "centroid": 0.4,
-        "is_beat": phase < 1 / 60, "is_onset": False, "frame_idx": 0,
+        "bass": kick, "high": level * 0.3,
+        "rms": level * 0.6, "transients": level * 0.3,
+        "is_beat": phase < 1 / 60, "frame_idx": 0,
         "bpm": 120.0 if level > 0 else 0.0, "beat_phase": phase,
         "spectrum": spec, "eq_bands": eq,
     }

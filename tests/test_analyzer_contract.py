@@ -13,12 +13,10 @@ from audio.analyzer import AudioAnalyzer
 
 pytestmark = pytest.mark.slow
 
-SCALARS = ("bass", "low_mid", "mid", "high", "hz_10_11", "hz_11_12",
-           "hz_12_14", "rms", "centroid", "transients", "beat_phase",
+SCALARS = ("bass", "high", "rms", "transients", "beat_phase",
            "kick_amp", "snare_amp", "section")
-NORMALIZED = ("bass", "low_mid", "mid", "high", "hz_10_11", "hz_11_12",
-              "hz_12_14", "rms", "centroid", "transients", "section")
-KEYS = set(SCALARS) | {"bpm", "eq_bands", "spectrum", "is_beat", "is_onset",
+NORMALIZED = ("bass", "high", "rms", "transients", "section")
+KEYS = set(SCALARS) | {"bpm", "eq_bands", "spectrum", "is_beat",
                        "kick_id", "snare_id", "frame_idx"}
 
 
@@ -44,8 +42,7 @@ def test_types_and_shapes(analyzer):
     f = analyzer.get_features(10)
     for k in SCALARS:
         assert isinstance(f[k], float), k
-    for k in ("is_beat", "is_onset"):
-        assert isinstance(f[k], bool), k
+    assert isinstance(f["is_beat"], bool)
     for k in ("kick_id", "snare_id", "frame_idx"):
         assert isinstance(f[k], int), k
     assert f["spectrum"].shape == (AudioAnalyzer.N_MELS,)

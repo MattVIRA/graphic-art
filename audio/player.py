@@ -47,6 +47,4 @@ class AudioPlayer:
     def get_current_features(self) -> dict:
         pos_ms = max(0, pygame.mixer.music.get_pos())
         frame_idx = self.analyzer.ms_to_frame(pos_ms)
-        features = self.analyzer.get_features(frame_idx)
-        features["waveform"] = self.analyzer.get_waveform(frame_idx)
-        return features
+        return self.analyzer.get_features(frame_idx)

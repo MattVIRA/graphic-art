@@ -4,8 +4,6 @@
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-# modules legacy, plus importés nulle part — supprimés par T22
-extend-exclude = ["visuals/effects.py", "visuals/spectrum.py", "visuals/waveform.py"]
 
 [tool.ruff.lint]
 select = [

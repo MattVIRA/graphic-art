@@ -38,8 +38,6 @@ class AudioAnalyzer:
             return e / (e.max() + 1e-8)
 
         self.bass    = band_energy(20,    250)
-        self.low_mid = band_energy(250,   800)
-        self.mid     = band_energy(800,   4000)
         self.high    = band_energy(4000,  20000)
 
         # 7-band EQ split (SUB → TREBLE) for the user-routable physics matrix
@@ -47,11 +45,6 @@ class AudioAnalyzer:
         edges = [(20, 60), (60, 250), (250, 800), (800, 2500),
                  (2500, 6000), (6000, 10000), (10000, 16000)]
         self.eq_bands = np.stack([band_energy(lo, hi) for lo, hi in edges])  # (7, n)
-
-        # Narrow kHz accent bands (for fine-grained reactivity)
-        self.hz_10_11 = band_energy(10000, 11000)
-        self.hz_11_12 = band_energy(11000, 12000)
-        self.hz_12_14 = band_energy(12000, 14000)
 
         # RMS energy
         rms = librosa.feature.rms(y=y, hop_length=hl)[0]
@@ -69,10 +62,6 @@ class AudioAnalyzer:
             self.beat_phase = (counts % 1.0).astype(np.float32)
         else:
             self.beat_phase = np.zeros(D.shape[1], dtype=np.float32)
-
-        # Onset detection
-        onset_frames = librosa.onset.onset_detect(y=y, sr=sr, hop_length=hl)
-        self.onset_set = set(onset_frames.tolist())
 
         # Transient density: HF transients counted over a sliding beat window.
         # High during drops / busy drum sections, low during breaks → drives
@@ -107,10 +96,6 @@ class AudioAnalyzer:
         slow = np.convolve(rms, np.ones(k) / k, mode="same")
         lo, hi = np.percentile(slow, 5), np.percentile(slow, 95)
         self.section = np.clip((slow - lo) / (hi - lo + 1e-8), 0.0, 1.0).astype(np.float32)
-
-        # Spectral centroid normalized to [0, 1]
-        centroid = librosa.feature.spectral_centroid(y=y, sr=sr, n_fft=self.n_fft, hop_length=hl)[0]
-        self.centroid = centroid / (sr / 2.0)
 
         # Mel spectrogram — shape (N_MELS, n_frames), normalized to [0, 1]
         mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=self.N_MELS, hop_length=hl)
@@ -149,19 +134,12 @@ class AudioAnalyzer:
         i = max(0, min(frame_idx, self.n_frames - 1))
         return {
             "bass":     float(self.bass[i]),
-            "low_mid":  float(self.low_mid[i]),
-            "mid":      float(self.mid[i]),
             "high":     float(self.high[i]),
-            "hz_10_11": float(self.hz_10_11[i]),
-            "hz_11_12": float(self.hz_11_12[i]),
-            "hz_12_14": float(self.hz_12_14[i]),
             "rms":      float(self.rms[i]),
             "transients": float(self.transient_density[min(i, len(self.transient_density) - 1)]),
             "is_beat":  i in self.beat_set,
             "bpm":      self.tempo,
             "beat_phase": float(self.beat_phase[min(i, len(self.beat_phase) - 1)]),
-            "is_onset": i in self.onset_set,
-            "centroid": float(self.centroid[i]),
             "spectrum": self.mel_norm[:, i].copy(),   # shape (N_MELS,)
             "eq_bands": self.eq_bands[:, i].copy(),   # shape (7,) SUB→TREBLE
             "kick_id":  int(self.kick_id[i]),
@@ -171,13 +149,3 @@ class AudioAnalyzer:
             "section":  float(self.section[min(i, len(self.section) - 1)]),
             "frame_idx": i,
         }
-
-    def get_waveform(self, frame_idx: int, n_samples: int = 2048) -> np.ndarray:
-        center = frame_idx * self.hop_length
-        half = n_samples // 2
-        start = max(0, center - half)
-        end = start + n_samples
-        chunk = self.y[start:min(end, len(self.y))]
-        if len(chunk) < n_samples:
-            chunk = np.pad(chunk, (0, n_samples - len(chunk)))
-        return chunk
