@@ -24,14 +24,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import glfw
-import pygame
 import moderngl
+import pygame
 
 from audio.analyzer import AudioAnalyzer
 from audio.player import AudioPlayer
 from gfx.camera import OrbitCamera
+from gfx.controls import EFFECTS, EQ_BANDS, ControlPanel
 from gfx.renderer import GLRenderer
-from gfx.controls import ControlPanel, EFFECTS, EQ_BANDS
 from visuals import mesh as meshlib
 from visuals.particles import ParticleSystem
 
@@ -293,7 +293,7 @@ def main():
         try:
             analyzer = AudioAnalyzer(path)
             player = AudioPlayer(path, analyzer)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — frontière : fichier choisi par l'utilisateur
             print(f"[error] cannot read audio file {os.path.basename(path)}: "
                   f"{type(e).__name__}: {e or 'format not recognised'}")
             return
@@ -420,7 +420,7 @@ def main():
             pending_model = None
             try:
                 particles.set_model(fut.result(), up)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — frontière : résultat du thread de chargement
                 print(f"[error] model load failed ({path}): {e}")
 
         if source is not None and source.is_done:
@@ -450,7 +450,7 @@ def main():
             elif name == "start_live":
                 try:
                     start_live(int(payload))
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — frontière : action du panneau
                     print(f"[error] live capture failed: {e}")
             elif name == "stop_source":
                 stop_source()

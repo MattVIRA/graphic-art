@@ -17,16 +17,16 @@ import os
 import sys
 import time
 
-import numpy as np
 import moderngl
+import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from gfx.camera import OrbitCamera           # noqa: E402
-from gfx.controls import DEFAULTS            # noqa: E402
-from gfx.renderer import GLRenderer          # noqa: E402
-from visuals import mesh as meshlib          # noqa: E402
+from gfx.camera import OrbitCamera  # noqa: E402
+from gfx.controls import DEFAULTS  # noqa: E402
+from gfx.renderer import GLRenderer  # noqa: E402
+from visuals import mesh as meshlib  # noqa: E402
 from visuals.particles import ParticleSystem  # noqa: E402
 
 W, H = 1280, 720

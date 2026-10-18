@@ -91,7 +91,8 @@ def _vertex_colors(g) -> np.ndarray:
             return grey
         c = np.asarray(c, dtype=np.float32)[:, :3] / 255.0
         return c if len(c) == n else grey
-    except Exception:
+    except Exception as e:  # noqa: BLE001 — fichier 3D arbitraire : repli sur le gris
+        print(f"  [warning] unreadable colors ({type(e).__name__}: {e}) — using grey")
         return grey
 
 
@@ -112,7 +113,8 @@ def _texture(g):
         if fac is not None:
             tex = tex * (np.asarray(fac, dtype=np.float32)[:3] / 255.0)
         return np.asarray(vis.uv, dtype=np.float32), tex
-    except Exception:
+    except Exception as e:  # noqa: BLE001 — fichier 3D arbitraire : repli sur le gris
+        print(f"  [warning] unreadable texture ({type(e).__name__}: {e}) — using grey")
         return None, None
 
 
@@ -122,11 +124,10 @@ def _to_part(g):
         pts = np.asarray(g.vertices, dtype=np.float32)
         if len(pts) == 0:
             return None
-        try:
-            c = np.asarray(g.colors, dtype=np.float32)[:, :3] / 255.0
-            if len(c) != len(pts):
-                raise ValueError
-        except Exception:
+        c = np.asarray(g.colors, dtype=np.float32)
+        if c.ndim == 2 and c.shape[1] >= 3 and len(c) == len(pts):
+            c = c[:, :3] / 255.0
+        else:   # nuage sans couleurs (cas normal) : gris
             c = np.full((len(pts), 3), GREY, dtype=np.float32)
         return _Part(points=pts, vcolor=c)
     if not isinstance(g, trimesh.Trimesh) or len(g.faces) == 0:

@@ -17,11 +17,10 @@ framebuffer resolution (logical size × pixel ratio → native Retina).
 
 import colorsys
 
-import numpy as np
 import moderngl
+import numpy as np
 
 from gfx import matcaps
-
 
 # ── Matrix helpers (row-major; act as M @ column_vector) ──────────────────────
 

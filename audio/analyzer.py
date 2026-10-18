@@ -1,5 +1,5 @@
-import numpy as np
 import librosa
+import numpy as np
 
 
 class AudioAnalyzer:
@@ -98,7 +98,6 @@ class AudioAnalyzer:
         # low band, snare/clap = onsets of the upper mids. Each frame carries
         # the id and strength of the latest hit, so the 60 fps render loop
         # never misses one even if it skips analysis frames.
-        n = D.shape[1]
         self.kick_id, self.kick_amp = self._hits(D, freqs, sr, hl, 30, 150, wait=8)
         self.snare_id, self.snare_amp = self._hits(D, freqs, sr, hl, 1500, 8000, wait=5)
 

@@ -7,11 +7,12 @@ No offline pre-analysis is possible, so every feature is normalized against a
 slowly-decaying running peak (the visuals adapt to the incoming level).
 """
 
+import contextlib
 import threading
 import time
 
-import numpy as np
 import librosa
+import numpy as np
 import sounddevice as sd
 
 
@@ -82,8 +83,9 @@ class LiveAnalyzer:
         try:
             info = sd.query_devices(device, "input")
             channels = max(1, min(2, int(info["max_input_channels"])))
-        except Exception:
-            pass
+        except (ValueError, sd.PortAudioError):
+            pass   # mono par défaut ; un périphérique invalide fait échouer
+                   # InputStream juste en dessous, avec un vrai message
         self._stream = sd.InputStream(device=device, channels=channels,
                                       samplerate=sr, blocksize=512,
                                       callback=self._callback)
@@ -128,11 +130,10 @@ class LiveAnalyzer:
         pass                       # live stream: nothing to pause
 
     def stop(self):
-        try:
+        # flux déjà fermé ou périphérique débranché : rien à arrêter
+        with contextlib.suppress(sd.PortAudioError):
             self._stream.stop()
             self._stream.close()
-        except Exception:
-            pass
 
     # ------------------------------------------------------------------
     # T2: streaming tempo estimation

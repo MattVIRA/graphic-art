@@ -12,6 +12,7 @@ packets (~15 Hz): band levels, rms, bpm, fps, source label. The panel draws
 VU meters in the Physique tab and a status bar at the bottom.
 """
 
+import contextlib
 import multiprocessing as mp
 import queue
 import random
@@ -287,10 +288,15 @@ def list_input_devices() -> list:
     """[(index, label), …] of capturable input devices."""
     try:
         import sounddevice as sd
+    except (ImportError, OSError) as e:   # PortAudio absent ou illisible
+        print(f"[warning] no live capture: {e}")
+        return []
+    try:
         return [(i, f"{d['name']}")
                 for i, d in enumerate(sd.query_devices())
                 if d["max_input_channels"] > 0]
-    except Exception:
+    except sd.PortAudioError as e:
+        print(f"[warning] cannot list the audio inputs: {e}")
         return []
 
 
@@ -313,7 +319,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                init_params: dict = None, init_geometry: str = None,
                notice: str = None):
     import tkinter as tk
-    from tkinter import ttk, filedialog
+    from tkinter import filedialog, ttk
 
     root = tk.Tk()
     root.title("Graphic Art — Contrôles")
@@ -322,10 +328,8 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
     root.configure(bg=BG)
 
     style = ttk.Style(root)
-    try:
+    with contextlib.suppress(tk.TclError):   # thème absent : celui par défaut
         style.theme_use("clam")
-    except Exception:
-        pass
     style.configure(".", background=BG, foreground=FG, font=FONT,
                     fieldbackground=TROUGH, bordercolor=TROUGH,
                     lightcolor=BG, darkcolor=BG)
