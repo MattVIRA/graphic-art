@@ -55,7 +55,8 @@ main.py        boucle principale, routing, caméra
 audio/         analyse du fichier, lecture, analyse live
 visuals/       particules, chargement des modèles 3D
 gfx/           rendu moderngl, panneau tkinter, matcaps
-presets.json   réglages sauvegardés
+presets.default.json   presets de départ (presets.json, local, n'est pas versionné)
+tests/         tests pytest
 ```
 
 `audio/` ne connaît ni `visuals/` ni `gfx/` : `main.py` fait le lien.

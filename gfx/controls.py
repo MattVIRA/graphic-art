@@ -12,62 +12,17 @@ packets (~15 Hz): band levels, rms, bpm, fps, source label. The panel draws
 VU meters in the Physique tab and a status bar at the bottom.
 """
 
-import json
 import multiprocessing as mp
-import os
 import queue
 import random
+import time
 
+from gfx import presets as store
 from gfx.matcaps import NAMES as MATCAP_NAMES
 from visuals.mesh import UP_AXES as MESH_UP_AXES
 
-# presets.json at the project root; "_autosave" is a reserved hidden entry,
-# "_window" stores the panel geometry (T7)
-PRESETS_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "presets.json")
-
-
-def _load_presets_file() -> dict:
-    try:
-        with open(PRESETS_PATH, "r", encoding="utf-8") as fh:
-            d = json.load(fh)
-            return d if isinstance(d, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_presets_file(d: dict):
-    try:
-        with open(PRESETS_PATH, "w", encoding="utf-8") as fh:
-            json.dump(d, fh, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"[warning] preset save failed: {e}")
-
-
-# Presets propres à un onglet (Vidéo, Physique) : {onglet: {nom: {clé: val}}}
-# sous la clé réservée "_tab_presets". Les presets codés en dur ne servent que
-# de graines à la première ouverture, ensuite tout est modifiable.
-TAB_PRESETS_KEY = "_tab_presets"
-
-
-def _load_tab_presets(tab: str, builtin: dict) -> dict:
-    d = _load_presets_file()
-    store = d.get(TAB_PRESETS_KEY)
-    if not isinstance(store, dict):
-        store = d[TAB_PRESETS_KEY] = {}
-    if not isinstance(store.get(tab), dict):
-        store[tab] = {n: dict(v) for n, v in builtin.items()}
-        _save_presets_file(d)
-    return store[tab]
-
-
-def _save_tab_presets(tab: str, presets: dict):
-    d = _load_presets_file()
-    if not isinstance(d.get(TAB_PRESETS_KEY), dict):
-        d[TAB_PRESETS_KEY] = {}
-    d[TAB_PRESETS_KEY][tab] = presets
-    _save_presets_file(d)
-
+# presets.json (gitignoré) : presets nommés + "_autosave" + "_window" (T7),
+# stockage atomique et presets de départ dans gfx/presets.py (T24)
 
 DEFAULTS = {
     # ── Vidéo ──
@@ -354,7 +309,8 @@ FONT_BOLD = ("Menlo", 11, "bold")
 
 
 def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
-               init_params: dict = None, init_geometry: str = None):
+               init_params: dict = None, init_geometry: str = None,
+               notice: str = None):
     import tkinter as tk
     from tkinter import ttk, filedialog
 
@@ -447,11 +403,13 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                 self.tip.destroy()
                 self.tip = None
 
-    # ── Barre presets utilisateur (globale, au-dessus des onglets) ─────
-    # Un preset = snapshot de TOUS les réglages (source et modèle exclus :
-    # ce ne sont pas des paramètres esthétiques).
+    # ── Barre presets globale (au-dessus des onglets) ──────────────────
+    # Un preset global = snapshot de TOUS les réglages (source et modèle
+    # exclus : ce ne sont pas des paramètres esthétiques).
+    ttk.Label(root, text="Preset global : tous les onglets",
+              style="Muted.TLabel").pack(anchor="w", padx=12, pady=(8, 0))
     preset_bar = ttk.Frame(root)
-    preset_bar.pack(fill="x", padx=10, pady=(10, 2))
+    preset_bar.pack(fill="x", padx=10, pady=(2, 2))
     preset_combo = ttk.Combobox(preset_bar, state="readonly", width=14,
                                 font=FONT_SM)
     preset_combo.pack(side="left", fill="x", expand=True)
@@ -468,6 +426,21 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
     status_lbl = tk.Label(root, text="—", bg=CARD, fg=MUTED, font=FONT_SM,
                           anchor="w", padx=10, pady=3)
     status_lbl.pack(fill="x", side="bottom")
+    status_hold = {"until": 0.0}   # message affiché : le monitoring attend
+
+    def flash_status(text, secs=4.0, color=ACCENT):
+        """Message temporaire dans la barre de statut (T24)."""
+        status_hold["until"] = time.monotonic() + secs
+        status_lbl.configure(text=text, fg=color)
+
+    def persist(fn) -> bool:
+        """store.update(fn) ; un échec d'écriture est affiché, pas avalé."""
+        try:
+            store.update(fn)
+            return True
+        except OSError as e:
+            flash_status(f"Échec de l'enregistrement : {e}", 8.0, "#ff9f6b")
+            return False
 
     scales = {}   # key → slider proxy (.get()/.set())
     checks = {}   # key → BooleanVar
@@ -631,11 +604,37 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                    command=lambda: apply_values(make_values())
                    ).pack(fill="x", padx=10, pady=(0, 4))
 
+    BUILTIN_TAG = "  (intégré)"
+
+    def ask_preset_name(title, current, taken, builtin=()):
+        """Nom saisi (None = annulé). Refuse les noms réservés ("_…") et
+        ceux des presets intégrés ; un nom existant demande confirmation."""
+        from tkinter import messagebox, simpledialog
+        name = simpledialog.askstring(
+            title, "Nom du preset (un nom existant le remplace) :",
+            initialvalue=current, parent=root)
+        name = (name or "").strip()
+        if not name:
+            return None
+        if name.startswith("_"):
+            messagebox.showwarning(title, "Un nom ne peut pas commencer "
+                                   "par « _ ».", parent=root)
+            return None
+        if name in builtin:
+            messagebox.showwarning(
+                title, f"« {name} » est un preset intégré : choisis un autre "
+                "nom pour enregistrer ta version.", parent=root)
+            return None
+        if name in taken and not messagebox.askyesno(
+                title, f"Remplacer « {name} » ?", parent=root):
+            return None
+        return name
+
     def tab_presets_ui(parent, tab, builtin, **pack_kw):
         """Presets propres à un onglet : liste + Charger / Sauver… / ✕.
-        Un preset = snapshot des réglages de l'onglet seulement."""
-        from tkinter import messagebox, simpledialog
-        grp = ttk.LabelFrame(parent, text="Presets")
+        Un preset = snapshot des réglages de l'onglet seulement. Les presets
+        intégrés (`builtin`) sont toujours listés, non supprimables."""
+        grp = ttk.LabelFrame(parent, text=f"Preset de l'onglet {tab}")
         grp.pack(fill="x", padx=10, **pack_kw)
         combo = ttk.Combobox(grp, state="readonly", width=14, font=FONT_SM)
         combo.grid(row=0, column=0, sticky="ew", padx=(8, 4), pady=8)
@@ -644,40 +643,65 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
         for c, b in enumerate(btns.values(), start=1):
             b.grid(row=0, column=c, padx=(0, 4 if c < 3 else 8), pady=8)
         grp.columnconfigure(0, weight=1)
-        presets = _load_tab_presets(tab, builtin)
+        Tooltip(combo, f"Ne touche qu'aux réglages de l'onglet {tab}.\n"
+                "Pour tout l'état du panneau : preset global, en haut.")
+        Tooltip(btns["Sauver…"], f"Enregistrer les réglages de l'onglet {tab}")
+        Tooltip(btns["✕"], "Supprimer ce preset (pas les presets intégrés)")
+        user = store.tab_user_presets(store.load()[0], tab, builtin)
+        listed = {}   # libellé affiché → nom
+
+        def entries():
+            return store.merged_tab_presets(user, builtin)
+
+        def selected():
+            return listed.get(combo.get())
 
         def refresh(select=None):
-            names = sorted(presets)
-            combo.configure(values=names or ["(aucun preset)"])
-            combo.set(select if select in presets else
-                      (names[0] if names else "(aucun preset)"))
+            listed.clear()
+            for n, (_, is_builtin) in sorted(entries().items()):
+                listed[n + (BUILTIN_TAG if is_builtin else "")] = n
+            labels = list(listed)
+            combo.configure(values=labels or ["(aucun preset)"])
+            label = next((lb for lb, n in listed.items() if n == select),
+                         labels[0] if labels else "(aucun preset)")
+            combo.set(label)
 
         def load():
-            vals = presets.get(combo.get())
-            if vals:
-                apply_values({k: v for k, v in vals.items() if k in DEFAULTS})
+            name = selected()
+            if name is None:
+                return
+            vals, _ = entries()[name]
+            # clés absentes (preset plus ancien que certains réglages) →
+            # valeur par défaut, pour un résultat toujours identique
+            keys = tab_keys.get(tab, ())
+            apply_values({k: vals.get(k, DEFAULTS[k]) for k in keys})
+            flash_status(f"Preset « {name} » chargé ({tab})")
 
         def save():
-            name = simpledialog.askstring(
-                "Preset", "Nom du preset (un nom existant le remplace) :",
-                initialvalue=combo.get() if combo.get() in presets else "",
-                parent=root)
-            name = (name or "").strip()
-            if not name:
+            name = ask_preset_name(f"Preset de l'onglet {tab}",
+                                   selected() if selected() in user else "",
+                                   user, builtin)
+            if name is None:
                 return
-            if name in presets and not messagebox.askyesno(
-                    "Preset", f"Remplacer « {name} » ?", parent=root):
+            user[name] = {k: float(v) for k, v in snapshot().items()
+                          if k in tab_keys.get(tab, ())}
+            if not persist(lambda d: store.set_tab_user_presets(d, tab, user)):
                 return
-            presets[name] = {k: float(v) for k, v in snapshot().items()
-                             if k in tab_keys.get(tab, ())}
-            _save_tab_presets(tab, presets)
             refresh(name)
+            flash_status(f"Preset « {name} » enregistré ({tab})")
 
         def delete():
-            if combo.get() in presets:
-                del presets[combo.get()]
-                _save_tab_presets(tab, presets)
-                refresh()
+            name = selected()
+            if name in user:
+                del user[name]
+                if not persist(
+                        lambda d: store.set_tab_user_presets(d, tab, user)):
+                    return
+                refresh(name)   # un intégré du même nom reprend sa place
+                flash_status(f"Preset « {name} » supprimé ({tab})")
+            elif name is not None:
+                flash_status(f"« {name} » est intégré : non supprimable",
+                             color=MUTED)
 
         btns["Charger"].configure(command=load)
         btns["Sauver…"].configure(command=save)
@@ -897,10 +921,11 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
             rms = min(max(pkt.get("rms", 0.0), 0.0), 1.0)
             blocks = "▓" * round(rms * 6) + "░" * (6 - round(rms * 6))
             bpm = pkt.get("bpm", 0.0)
-            status_lbl.configure(text=(
-                f"{'BPM %.0f' % bpm if bpm > 0 else 'BPM --'} · "
-                f"RMS {blocks} · {pkt.get('fps', 0.0):.0f} fps · "
-                f"{pkt.get('source', '—')}"))
+            if time.monotonic() >= status_hold["until"]:
+                status_lbl.configure(fg=MUTED, text=(
+                    f"{'BPM %.0f' % bpm if bpm > 0 else 'BPM --'} · "
+                    f"RMS {blocks} · {pkt.get('fps', 0.0):.0f} fps · "
+                    f"{pkt.get('source', '—')}"))
         root.after(66, poll_monitor)   # ~15 Hz
 
     poll_monitor()
@@ -931,9 +956,8 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
             vals[k] = float(c.current())
         return vals
 
-    def refresh_preset_list(select: str = None):
-        names = sorted(n for n in _load_presets_file()
-                       if not n.startswith("_"))
+    def refresh_preset_list(select: str = None) -> list:
+        names = store.global_names(store.load()[0])
         preset_combo.configure(values=names or ["(aucun preset)"])
         if select and select in names:
             preset_combo.set(select)
@@ -941,39 +965,58 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
             preset_combo.current(0)
         else:
             preset_combo.set("(aucun preset)")
+        return names
 
     def save_preset():
-        from tkinter import simpledialog
-        name = simpledialog.askstring("Preset", "Nom du preset :", parent=root)
-        if not name or name.strip() == "" or name.strip().startswith("_"):
+        names = store.global_names(store.load()[0])
+        cur = preset_combo.get()
+        name = ask_preset_name("Preset global", cur if cur in names else "",
+                               names)
+        if name is None:
             return
-        d = _load_presets_file()
-        d[name.strip()] = snapshot()
-        _save_presets_file(d)
-        refresh_preset_list(name.strip())
+        vals = snapshot()
+        if not persist(lambda d: d.__setitem__(name, vals)):
+            return
+        refresh_preset_list(name)
+        flash_status(f"Preset « {name} » enregistré (tous les onglets)")
 
     def load_preset():
-        d = _load_presets_file()
         name = preset_combo.get()
-        if name in d:
-            apply_values({k: v for k, v in d[name].items() if k in DEFAULTS})
+        vals = store.load()[0].get(name)
+        if name.startswith("_") or not isinstance(vals, dict):
+            return
+        # clés absentes (preset plus ancien que certains réglages) → défaut
+        apply_values({k: vals.get(k, v) for k, v in DEFAULTS.items()})
+        flash_status(f"Preset « {name} » chargé (tous les onglets)")
 
     def delete_preset():
-        d = _load_presets_file()
+        from tkinter import messagebox
         name = preset_combo.get()
-        if name in d:
-            del d[name]
-            _save_presets_file(d)
-            refresh_preset_list()
+        if name not in store.global_names(store.load()[0]):
+            return
+        if not messagebox.askyesno("Preset global", f"Supprimer « {name} » ?",
+                                   parent=root):
+            return
+        if not persist(lambda d: d.pop(name, None)):
+            return
+        refresh_preset_list()
+        flash_status(f"Preset « {name} » supprimé")
 
     btn_load.configure(command=load_preset)
     btn_save.configure(command=save_preset)
     btn_del.configure(command=delete_preset)
+    Tooltip(preset_combo, "Preset global : l'état de TOUS les onglets\n"
+            "(source audio et modèle 3D exclus).\n"
+            "Les onglets Vidéo et Physique ont aussi leurs propres presets.")
+    Tooltip(btn_save, "Enregistrer tous les réglages sous un nom")
+    Tooltip(btn_del, "Supprimer le preset global sélectionné")
     refresh_preset_list()
 
     # restore the autosaved state (pushes the values back to main via the queue)
     if init_params:
         apply_values({k: v for k, v in init_params.items() if k in DEFAULTS})
+    if notice:   # presets.json était illisible (T24)
+        flash_status(notice, secs=15.0, color="#ff9f6b")
 
     root.mainloop()
 
@@ -984,8 +1027,9 @@ class ControlPanel:
     def __init__(self):
         self.params = dict(DEFAULTS)
         # restore the last session's settings (source and model excluded)
-        presets = _load_presets_file()
-        auto = presets.get("_autosave", {})
+        presets, notice = store.load()
+        auto = presets.get("_autosave")
+        auto = auto if isinstance(auto, dict) else {}
         self.params.update({k: float(v) for k, v in auto.items() if k in DEFAULTS})
         self.window_geometry = presets.get("_window") or None
         self.actions = []            # pending ("name", payload) actions
@@ -994,17 +1038,20 @@ class ControlPanel:
         self._proc = mp.Process(target=_run_panel,
                                 args=(self._q, self._mon_q,
                                       list_input_devices(), auto,
-                                      self.window_geometry),
+                                      self.window_geometry, notice),
                                 daemon=True)
         self._proc.start()
 
     def save_autosave(self):
         """Persist the current settings; restored on the next launch."""
-        d = _load_presets_file()
-        d["_autosave"] = {k: float(v) for k, v in self.params.items()}
-        if self.window_geometry:
-            d["_window"] = self.window_geometry
-        _save_presets_file(d)
+        def put(d):
+            d["_autosave"] = {k: float(v) for k, v in self.params.items()}
+            if self.window_geometry:
+                d["_window"] = self.window_geometry
+        try:
+            store.update(put)
+        except OSError as e:
+            print(f"[warning] autosave failed: {e}")
 
     def send_monitor(self, packet: dict):
         """Push a monitoring packet to the panel (drops if the queue is full,
