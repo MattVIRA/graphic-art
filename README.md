@@ -70,6 +70,7 @@ visuals/       modèle 3D affiché, chargement des modèles 3D
 gfx/           rendu moderngl, panneau tkinter, matcaps
 presets.default.json   presets de départ (presets.json, local, n'est pas versionné)
 tests/         tests pytest
+logs/          journal de l'appli (graphic-art.log, local) : à lire si quelque chose ne marche pas
 pyproject.toml           règles ruff ; .pre-commit-config.yaml : contrôle au commit
 ```
 

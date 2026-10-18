@@ -10,9 +10,16 @@ The main loop polls `ControlPanel.poll()` once per frame.
 T8: a second queue goes the other way (main → panel) with small monitoring
 packets (~15 Hz): band levels, rms, bpm, fps, source label. The panel draws
 VU meters in the Physique tab and a status bar at the bottom.
+
+T22 : les paquets portent aussi les messages d'erreur du moteur (`errors`),
+affichés en rouge dans la barre de statut. La file est à perte (seul le
+paquet le plus frais compte) : les erreurs attendent donc côté moteur
+jusqu'à ce qu'un paquet soit accepté, et le panneau les lit dans tous les
+paquets qu'il vide.
 """
 
 import contextlib
+import logging
 import multiprocessing as mp
 import queue
 import random
@@ -21,6 +28,8 @@ import time
 from gfx import presets as store
 from gfx.matcaps import NAMES as MATCAP_NAMES
 from visuals.mesh import UP_AXES as MESH_UP_AXES
+
+log = logging.getLogger(__name__)
 
 # presets.json (gitignoré) : presets nommés + "_autosave" + "_window" (T7),
 # stockage atomique et presets de départ dans gfx/presets.py (T24)
@@ -289,14 +298,14 @@ def list_input_devices() -> list:
     try:
         import sounddevice as sd
     except (ImportError, OSError) as e:   # PortAudio absent ou illisible
-        print(f"[warning] no live capture: {e}")
+        log.warning("pas de capture live : %s", e)
         return []
     try:
         return [(i, f"{d['name']}")
                 for i, d in enumerate(sd.query_devices())
                 if d["max_input_channels"] > 0]
     except sd.PortAudioError as e:
-        print(f"[warning] cannot list the audio inputs: {e}")
+        log.warning("impossible de lister les entrées audio : %s", e)
         return []
 
 
@@ -308,6 +317,8 @@ FG      = "#c8c8d8"
 MUTED   = "#71718a"
 ACCENT  = "#5fd7d7"   # cyan — values, VU meters
 ACCENT2 = "#8a7fd7"   # violet — selection, active elements
+ERROR   = "#ff6b6b"   # T22 : erreurs du moteur dans la barre de statut
+ERROR_SECS = 5.0      # durée d'affichage d'une erreur
 VU_BG   = "#101018"
 
 FONT      = ("Menlo", 11)
@@ -315,7 +326,7 @@ FONT_SM   = ("Menlo", 10)
 FONT_BOLD = ("Menlo", 11, "bold")
 
 
-def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
+def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — panneau tkinter remplacé par T27
                init_params: dict = None, init_geometry: str = None,
                notice: str = None):
     import tkinter as tk
@@ -635,7 +646,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
             return None
         return name
 
-    def tab_presets_ui(parent, tab, builtin, **pack_kw):
+    def tab_presets_ui(parent, tab, builtin, **pack_kw):  # noqa: C901 — idem (T27)
         """Presets propres à un onglet : liste + Charger / Sauver… / ✕.
         Un preset = snapshot des réglages de l'onglet seulement. Les presets
         intégrés (`builtin`) sont toujours listés, non supprimables."""
@@ -917,12 +928,16 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
     vu_levels = [0.0] * len(EQ_BANDS)
 
     def poll_monitor():
-        pkt = None
-        while True:   # drain: only the freshest packet matters
+        pkt, errors = None, []
+        while True:   # drain: only the freshest packet matters…
             try:
                 pkt = mon_q.get_nowait()
             except queue.Empty:
                 break
+            errors += pkt.get("errors", ())   # …but every error does
+        if errors:
+            more = f"  (+{len(errors) - 1} autre(s), voir logs/)" if len(errors) > 1 else ""
+            flash_status(f"⚠ {errors[-1]}{more}", ERROR_SECS, ERROR)
         if pkt is not None:
             bands = pkt.get("bands", ())
             for j, (vu, bar) in enumerate(vu_canvases):
@@ -1048,6 +1063,7 @@ class ControlPanel:
         self.window_geometry = presets.get("_window") or None
         self.camera_state = presets.get("_camera")   # T26, autosave only
         self.actions = []            # pending ("name", payload) actions
+        self._errors = []            # T22 : messages en attente d'un paquet de monitoring
         self._q = mp.Queue()
         self._mon_q = mp.Queue(maxsize=4)   # main → panel monitoring (T8)
         self._proc = mp.Process(target=_run_panel,
@@ -1068,15 +1084,28 @@ class ControlPanel:
         try:
             store.update(put)
         except OSError as e:
-            print(f"[warning] autosave failed: {e}")
+            log.exception("échec de la sauvegarde automatique : %s", e)
 
     def send_monitor(self, packet: dict):
         """Push a monitoring packet to the panel (drops if the queue is full,
-        the panel only cares about the freshest one)."""
+        the panel only cares about the freshest one). Les erreurs en attente
+        partent avec lui ; refusé, elles attendent le paquet suivant."""
+        if self._errors:
+            packet = dict(packet, errors=list(self._errors))
         try:
             self._mon_q.put_nowait(packet)
         except queue.Full:
-            pass
+            return
+        self._errors.clear()
+
+    def report(self, message: str):
+        """Message d'erreur à afficher dans la barre de statut (T22)."""
+        self._errors = (self._errors + [message])[-20:]   # panneau mort : pas de fuite
+
+    @property
+    def alive(self) -> bool:
+        """False si le process du panneau s'est arrêté (fermé, tué, planté)."""
+        return self._proc.is_alive()
 
     def poll(self) -> dict:
         """Drain pending messages; return the parameter dict.

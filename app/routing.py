@@ -121,11 +121,12 @@ class Reactor:
         f["spectrum"] = env.smooth("spectrum", f["spectrum"], dt, react)
         f["eq_bands"] = env.smooth("eq_bands", f["eq_bands"], dt, react)
 
-        # beat flash: spikes on each beat then decays quickly
+        # beat flash: spikes on each beat then decays quickly (×0.86 par
+        # 1/60 s, en temps réel)
         if f.get("is_beat"):
             self.beat_env = 1.0
         else:
-            self.beat_env *= 0.86
+            self.beat_env *= 0.86 ** (dt * 60.0)
 
         # ── percussive layer: kick spring, snare flash, section energy ──
         kid, sid = f.get("kick_id", 0), f.get("snare_id", 0)

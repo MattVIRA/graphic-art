@@ -19,6 +19,7 @@ import sounddevice as sd
 class LiveAnalyzer:
     N_MELS = 64
     N_FFT = 2048
+    LOST_AFTER_S = 2.0      # sans bloc depuis ce délai → entrée perdue
 
     # (lo, hi) Hz — must match AudioAnalyzer
     _BANDS = {"bass": (20, 250), "high": (4000, 20000)}
@@ -57,7 +58,6 @@ class LiveAnalyzer:
         self._beat_anchor = 0      # absolute block index of a beat
         self._last_est = 0
         self._prev_phase = 0.0
-        self._beat_flag = False
         # transient tracking (HF spectral flux)
         self._hf_ema = 1e-6
         self._events = []
@@ -81,6 +81,8 @@ class LiveAnalyzer:
         except (ValueError, sd.PortAudioError):
             pass   # mono par défaut ; un périphérique invalide fait échouer
                    # InputStream juste en dessous, avec un vrai message
+        self._last_block = time.monotonic()   # dernier bloc reçu (T22 : perte du périphérique)
+        self._xruns = 0                         # blocs signalés en défaut par PortAudio
         self._stream = sd.InputStream(device=device, channels=channels,
                                       samplerate=sr, blocksize=512,
                                       callback=self._callback)
@@ -90,6 +92,9 @@ class LiveAnalyzer:
     # Stream
 
     def _callback(self, indata, frames, t, status):
+        self._last_block = time.monotonic()
+        if status:      # débordement / sous-alimentation du flux
+            self._xruns += 1
         mono = indata.mean(axis=1).astype(np.float32)
         # beat envelope: positive energy flux per block (kicks spike it)
         block_rms = float(np.sqrt(np.mean(mono ** 2)))
@@ -120,6 +125,17 @@ class LiveAnalyzer:
     @property
     def is_done(self) -> bool:
         return False
+
+    @property
+    def is_lost(self) -> bool:
+        """Plus aucun bloc depuis LOST_AFTER_S : périphérique débranché ou
+        flux mort (CoreAudio ne lève pas d'erreur, les blocs cessent)."""
+        return time.monotonic() - self._last_block > self.LOST_AFTER_S
+
+    def take_xruns(self) -> int:
+        """Nombre de blocs en défaut depuis le dernier appel."""
+        n, self._xruns = self._xruns, 0
+        return n
 
     def toggle_pause(self):
         pass                       # live stream: nothing to pause

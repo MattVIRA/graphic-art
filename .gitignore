@@ -38,9 +38,13 @@ captures/
 # Caches Python / outils
 *.egg-info/
 .pytest_cache/
+.ruff_cahce/
 
 # Presets utilisateur (T24) : seul presets.default.json est versionné
 presets.json
 presets.json.tmp
 presets.backup.json
 presets.corrupt-*.json
+
+# Journal de l'appli (T22)
+logs/

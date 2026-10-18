@@ -1,5 +1,9 @@
+import logging
+
 import librosa
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 
 class AudioAnalyzer:
@@ -14,13 +18,14 @@ class AudioAnalyzer:
         self.hop_length = self.HOP_LENGTH
         self.n_fft = self.N_FFT
 
-        print("  Loading audio...")
+        log.info("  décodage…")
         self.y, self.sr = librosa.load(filepath, sr=sr, mono=True)
         self.duration = len(self.y) / self.sr
 
-        print("  Analyzing spectrum and beats...")
+        log.info("  analyse du spectre et des beats…")
         self._analyze()
-        print(f"  Done — {self.duration:.1f}s  |  {self.n_frames} frames  |  {self.tempo:.0f} BPM")
+        log.info("  prêt — %.1f s  |  %d frames  |  %.0f BPM",
+                 self.duration, self.n_frames, self.tempo)
 
     # ------------------------------------------------------------------
     # Private

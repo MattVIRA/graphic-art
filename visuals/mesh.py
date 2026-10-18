@@ -13,9 +13,12 @@ Model space matches the rest of the app: centered on the origin, Y up, pixel
 units (the bounding sphere gets a fixed radius, whatever the file's units).
 """
 
+import logging
 import os
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 MODEL_EXT = {".glb", ".gltf", ".obj", ".stl", ".ply"}
 PRIMITIVES = ("icosphere", "torus", "box")
@@ -92,7 +95,7 @@ def _vertex_colors(g) -> np.ndarray:
         c = np.asarray(c, dtype=np.float32)[:, :3] / 255.0
         return c if len(c) == n else grey
     except Exception as e:  # noqa: BLE001 — fichier 3D arbitraire : repli sur le gris
-        print(f"  [warning] unreadable colors ({type(e).__name__}: {e}) — using grey")
+        log.warning("couleurs illisibles (%s: %s) : gris", type(e).__name__, e, exc_info=e)
         return grey
 
 
@@ -114,7 +117,7 @@ def _texture(g):
             tex = tex * (np.asarray(fac, dtype=np.float32)[:3] / 255.0)
         return np.asarray(vis.uv, dtype=np.float32), tex
     except Exception as e:  # noqa: BLE001 — fichier 3D arbitraire : repli sur le gris
-        print(f"  [warning] unreadable texture ({type(e).__name__}: {e}) — using grey")
+        log.warning("texture illisible (%s: %s) : gris", type(e).__name__, e, exc_info=e)
         return None, None
 
 
@@ -177,8 +180,8 @@ def _build_render(parts):
         colors = np.asarray(m.visual.vertex_colors, dtype=np.float32)[:, :3] / 255.0
 
     if len(m.faces) > MAX_RENDER_FACES:
-        print(f"  [warning] {len(m.faces):,} triangles — decimating to "
-              f"{DECIMATE_TO:,} for the surface/wire styles")
+        log.warning("%s triangles : décimation à %s pour les styles surface / fil",
+                    f"{len(m.faces):,}", f"{DECIMATE_TO:,}")
         src_v = np.asarray(m.vertices)
         m = m.simplify_quadric_decimation(face_count=DECIMATE_TO)
         from scipy.spatial import cKDTree
@@ -266,8 +269,8 @@ def load_model(path: str) -> RawModel:
     render = _build_render(parts)
     model = RawModel(name, parts, render)
     n_tri = len(render["tris"]) if render else 0
-    print(f"  Model loaded: {name} — {len(parts)} part(s), {n_tri:,} triangles"
-          + (f", {len(render['edges']):,} edges" if render else " (point cloud)"))
+    log.info("Modèle chargé : %s — %d partie(s), %s triangles%s", name, len(parts),
+             f"{n_tri:,}", f", {len(render['edges']):,} arêtes" if render else " (nuage de points)")
     return model
 
 

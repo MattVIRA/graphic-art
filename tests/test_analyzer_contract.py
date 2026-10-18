@@ -1,5 +1,5 @@
 """Contrat des features (T25) : AudioAnalyzer renvoie toutes les clés du
-dictionnaire d'architecture.md, avec les bons types. Les visuels et main.py
+dictionnaire d'architecture.md (tests/contract.py), avec les bons types. Les visuels et main.py
 s'appuient sur ces clés : un renommage doit casser ce test, pas l'appli.
 
 Lent (analyse librosa ≈ 2 s) : marqué `slow`, exclu du hook de fin de tour,
@@ -10,14 +10,9 @@ import pytest
 import soundfile as sf
 
 from audio.analyzer import AudioAnalyzer
+from tests.contract import KEYS, NORMALIZED, check_types
 
 pytestmark = pytest.mark.slow
-
-SCALARS = ("bass", "high", "rms", "transients", "beat_phase",
-           "kick_amp", "snare_amp", "section")
-NORMALIZED = ("bass", "high", "rms", "transients", "section")
-KEYS = set(SCALARS) | {"bpm", "eq_bands", "spectrum", "is_beat",
-                       "kick_id", "snare_id", "frame_idx"}
 
 
 @pytest.fixture(scope="module")
@@ -40,13 +35,7 @@ def test_all_documented_keys(analyzer):
 
 def test_types_and_shapes(analyzer):
     f = analyzer.get_features(10)
-    for k in SCALARS:
-        assert isinstance(f[k], float), k
-    assert isinstance(f["is_beat"], bool)
-    for k in ("kick_id", "snare_id", "frame_idx"):
-        assert isinstance(f[k], int), k
-    assert f["spectrum"].shape == (AudioAnalyzer.N_MELS,)
-    assert f["eq_bands"].shape == (7,)
+    check_types(f)
     assert float(f["bpm"]) > 0.0
 
 

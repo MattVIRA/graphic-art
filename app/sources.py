@@ -2,14 +2,21 @@
 
 Une seule source à la fois ; changer de source n'arrête l'ancienne qu'une
 fois la nouvelle prête (un fichier illisible ne coupe pas la musique).
+Une entrée invalide lève `UserError` ; la perte d'une entrée live en cours
+de route est signalée par `report(message)` et ramène au silence.
 """
 
+import logging
 import os
+import time
 
 import numpy as np
 
+from app.errors import UserError
 from audio.analyzer import AudioAnalyzer
 from audio.player import AudioPlayer
+
+log = logging.getLogger(__name__)
 
 # features renvoyées quand aucune source ne joue (même contrat que les
 # analyseurs : voir le dictionnaire des features dans architecture.md)
@@ -22,15 +29,21 @@ SILENT_FEATURES = {
     "section": 0.0,
 }
 
+XRUN_LOG_PERIOD_S = 10.0   # décrochages live : au plus une ligne de journal par période
+
 
 class SourceManager:
     """Possède la source audio. `on_title(texte)` reçoit le titre de fenêtre
-    à afficher quand la source change."""
+    à afficher quand la source change ; `report(message)` les incidents
+    survenus hors d'une action de l'utilisateur."""
 
-    def __init__(self, on_title=None):
+    def __init__(self, on_title=None, report=None):
         self.source = None      # objet avec get_current_features / toggle_pause / stop
         self.tempo = 0.0        # tempo de l'analyse hors ligne (fichier), pour le HUD
         self._on_title = on_title or (lambda _text: None)
+        self._report = report or (lambda message: log.warning("%s", message))
+        self._xruns = 0
+        self._xrun_log_t = 0.0
 
     # ── changer de source ─────────────────────────────────────────────
     def stop(self):
@@ -41,41 +54,63 @@ class SourceManager:
         self.tempo = 0.0
 
     def start_file(self, path: str):
-        """Analyze then play an audio file. On any failure (missing, empty or
-        undecodable file) print why and keep the current source playing."""
-        print(f"\nLoading: {path}")
+        """Analyse puis joue un fichier audio. Fichier introuvable, vide ou
+        illisible → `UserError`, et la source courante continue."""
+        name = os.path.basename(path)
+        log.info("Chargement audio : %s", path)
         if not os.path.isfile(path):
-            print(f"[error] audio file not found: {path}")
-            return
+            raise UserError(f"Fichier audio introuvable : {path}")
         if os.path.getsize(path) == 0:
-            print(f"[error] audio file is empty (0 bytes): {path}")
-            return
+            raise UserError(f"Fichier audio vide (0 octet) : {name}")
         try:
             analyzer = AudioAnalyzer(path)
             player = AudioPlayer(path, analyzer)
         except Exception as e:  # noqa: BLE001 — frontière : fichier choisi par l'utilisateur
-            print(f"[error] cannot read audio file {os.path.basename(path)}: "
-                  f"{type(e).__name__}: {e or 'format not recognised'}")
-            return
+            # librosa / audioread / pygame lèvent des types variés selon le
+            # format ; la trace va au journal, le message à l'utilisateur
+            log.info("lecture de %s impossible", path, exc_info=e)
+            raise UserError(f"Fichier audio illisible : {name} "
+                            f"({type(e).__name__}: {e or 'format non reconnu'})") from e
         self.stop()    # only once the new file is known to be readable
         player.play()
         self.source = player
         self.tempo = analyzer.tempo
-        self._on_title(f"Graphic Art  ·  {os.path.basename(path)}")
+        self._on_title(f"Graphic Art  ·  {name}")
 
     def start_live(self, device: int):
-        """Capture live sur le périphérique d'entrée `device`."""
-        self.stop()
+        """Capture live sur le périphérique d'entrée `device` ; la source
+        courante n'est arrêtée qu'une fois le flux ouvert."""
         from audio.live import LiveAnalyzer  # sounddevice : chargé à la demande
-        print(f"\nLive capture on input device {device}")
-        self.source = LiveAnalyzer(device=device)
+        log.info("Capture live sur le périphérique %s", device)
+        live = LiveAnalyzer(device=device)
+        self.stop()
+        self.source = live
+        self._xruns = 0
         self._on_title("Graphic Art  ·  LIVE")
 
     # ── par frame ─────────────────────────────────────────────────────
     def update(self):
-        """Fin du fichier : on garde la fenêtre ouverte, en silence."""
-        if self.source is not None and self.source.is_done:
+        """Fin du fichier ou entrée live perdue → silence."""
+        src = self.source
+        if src is None:
+            return
+        if src.is_done:
+            self.stop()    # file ended: keep the window open, go silent
+        elif getattr(src, "is_lost", False):
             self.stop()
+            self._report("Entrée live perdue (périphérique débranché ?) : "
+                         "retour au silence")
+        else:
+            self._log_xruns(src)
+
+    def _log_xruns(self, src):
+        """Décrochages du flux live (blocs perdus) : journal seulement, un
+        décrochage isolé ne mérite pas d'alerter l'utilisateur."""
+        self._xruns += getattr(src, "take_xruns", lambda: 0)()
+        now = time.monotonic()
+        if self._xruns and now - self._xrun_log_t > XRUN_LOG_PERIOD_S:
+            log.warning("capture live : %d décrochage(s) du flux audio", self._xruns)
+            self._xruns, self._xrun_log_t = 0, now
 
     def features(self) -> dict:
         """Features de l'instant (silence sans source)."""

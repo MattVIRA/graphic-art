@@ -27,7 +27,7 @@ class ModelSource:
         self.n = 0
         self.rev = 0                  # bumped on every rebuild → re-upload GPU buffers
         self.angle = 0.0              # accumulated rotation (rad)
-        self.rot_speed = 0.004        # smoothed rotation speed (rad/frame)
+        self.rot_speed = 0.004        # smoothed rotation speed (rad per 1/60 s)
 
         self._model = None            # mesh.RawModel (cached parsed file)
         self.model_points = None      # (N,10) static point buffer
@@ -75,8 +75,11 @@ class ModelSource:
         pos3, color3, aux4 = [normal3, band]."""
         return self.model_points, self.n
 
-    def gpu_uniforms(self, f, params=None, time_s: float = 0.0) -> dict:
-        """Advance the rotation and return the per-frame uniform dict."""
+    def gpu_uniforms(self, f, params=None, time_s: float = 0.0,
+                     dt: float = 1.0 / 60.0) -> dict:
+        """Advance the rotation and return the per-frame uniform dict.
+        dt en secondes : les constantes sont réglées pour 60 fps, `k`
+        ramène le pas réel à ce repère (T22 : même vitesse à 30 ou 120 fps)."""
         params = params or {}
         want_up = int(params.get("model_up", 0.0))
         if self._model is not None and want_up != self.model_up:
@@ -87,8 +90,9 @@ class ModelSource:
         # breaks, fast during drops / busy drum sections. Smoothed so it ramps.
         target_speed = (0.0015 + f.get("transients", 0.0) * 0.035 + f["high"] * 0.008
                         + params.get("fx_rot", 0.0) * 0.05)
-        self.rot_speed += (target_speed - self.rot_speed) * 0.04
-        self.angle += self.rot_speed * params.get("rot_gain", 1.0)
+        k = dt * 60.0
+        self.rot_speed += (target_speed - self.rot_speed) * (1.0 - 0.96 ** k)
+        self.angle += self.rot_speed * params.get("rot_gain", 1.0) * k
 
         return {
             "u_inflate": params.get("inflate", 0.0),

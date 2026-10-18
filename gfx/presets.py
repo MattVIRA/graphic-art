@@ -17,9 +17,12 @@ apparaît chez tout le monde.
 """
 
 import json
+import logging
 import os
 import shutil
 import time
+
+log = logging.getLogger(__name__)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 USER_PATH = os.path.join(ROOT, "presets.json")
@@ -79,7 +82,7 @@ def load() -> tuple[dict, str | None]:
         _write_atomic(USER_PATH, restored)
         msg = (f"presets.json illisible ({e}) : mis de côté sous "
                f"{os.path.basename(corrupt)}, restauré depuis {origin}.")
-        print(f"[warning] {msg}")
+        log.warning("%s", msg)
         return restored, msg
     if d is None:   # premier lancement
         d = _read_or_none(DEFAULT_PATH) or {}

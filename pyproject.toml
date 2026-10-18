@@ -13,5 +13,13 @@ select = [
     "E722",          # except nu
     "BLE001",        # except Exception : seulement aux frontières, avec # noqa justifié
     "S110", "S112",  # except … : pass / continue silencieux
+    "T201",          # print : passer par logging (app/log.py, T22)
+    "TRY400",        # dans un except : logger.exception plutôt que logger.error
+    "C901",          # complexité > 10 : découper (T22)
+    "ERA001",        # code commenté laissé en place
 ]
-# À activer avec le logging de T22 : T201 (print), TRY400, C901, ERA001
+
+[tool.ruff.lint.per-file-ignores]
+# outils en ligne de commande : leur sortie est faite pour la console
+"tools/*" = ["T201"]
+".claude/hooks/*" = ["T201"]

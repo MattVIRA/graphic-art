@@ -17,7 +17,9 @@ class Hud:
         self.surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
         self._last = None
 
-    def build(self, features, tempo, paused, mode, n):
+    def build(self, features, tempo, paused, mode, n, notice=None):
+        """`notice` (T22) : message d'erreur affiché en rouge à la place de
+        l'aide, le temps que l'appelant le garde."""
         line = (f"BPM {tempo:.0f}  |  RMS {features['rms']:.2f}  |  "
                 f"BASS {features['bass']:.2f}  |  {(mode or '…').upper()}  |  {n} pts")
         hint = ("SPACE pause   F plein écran   Cmd/Ctrl+glisser orbite   "
@@ -25,7 +27,7 @@ class Hud:
                 "U tore   ESC quitter")
         if paused:
             line += "   [PAUSED]"
-        key = (line, hint)
+        key = (line, hint, notice)
         if key == self._last:
             return self.surf
         self._last = key
@@ -33,7 +35,8 @@ class Hud:
         k = self.scale
         self.surf.blit(self.font.render(line, True, (120, 120, 150)),
                        (int(12 * k), int(4 * k)))
-        self.surf.blit(self.font.render(hint, True, (70, 60, 80)),
+        second, color = (f"ERREUR  {notice}", (235, 110, 110)) if notice else (hint, (70, 60, 80))
+        self.surf.blit(self.font.render(second, True, color),
                        (int(12 * k), int(21 * k)))
         return self.surf
 

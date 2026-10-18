@@ -10,8 +10,8 @@ import glfw
 
 
 class FrameClock:
-    """dt + fps measurement and a frame-rate cap (the physics is per frame,
-    so a 120 Hz display must not double the animation speed)."""
+    """dt + fps measurement and a frame-rate cap. L'animation suit dt
+    depuis T22 ; le cap évite de dessiner plus d'images qu'utile."""
 
     def __init__(self, fps: int):
         self.period = 1.0 / fps
@@ -55,7 +55,7 @@ class Window:
 
         self.events = []
         w = self.handle
-        glfw.set_key_callback(w, lambda _w, key, sc, action, mods:
+        glfw.set_key_callback(w, lambda _w, key, _sc, action, mods:
                               self.events.append(("key", key))
                               if action == glfw.PRESS else None)
         glfw.set_scroll_callback(w, lambda _w, dx, dy: self.events.append(("wheel", dy)))
