@@ -280,11 +280,24 @@ def main():
         hud_tempo = 0.0
 
     def start_file(path):
+        """Analyze then play an audio file. On any failure (missing, empty or
+        undecodable file) print why and keep the current source playing."""
         nonlocal source, hud_tempo
-        stop_source()
         print(f"\nLoading: {path}")
-        analyzer = AudioAnalyzer(path)
-        player = AudioPlayer(path, analyzer)
+        if not os.path.isfile(path):
+            print(f"[error] audio file not found: {path}")
+            return
+        if os.path.getsize(path) == 0:
+            print(f"[error] audio file is empty (0 bytes): {path}")
+            return
+        try:
+            analyzer = AudioAnalyzer(path)
+            player = AudioPlayer(path, analyzer)
+        except Exception as e:
+            print(f"[error] cannot read audio file {os.path.basename(path)}: "
+                  f"{type(e).__name__}: {e or 'format not recognised'}")
+            return
+        stop_source()    # only once the new file is known to be readable
         player.play()
         source = player
         hud_tempo = analyzer.tempo
