@@ -9,6 +9,8 @@ drawn as points, surface or wireframe (style chosen in the panel).
   --visual primitive:box    → another built-in shape (icosphere, torus, box)
 
 Keys: SPACE pause/resume  |  ESC quit  |  U back to the torus  |  F fullscreen
+Mouse (T26): Cmd/Ctrl + drag or middle drag = orbit  |  Shift + drag = pan  |
+             wheel = zoom  |  C or double-click = back to the default view
 
 The window is a GLFW window (native Retina framebuffer); pygame only provides
 the audio playback (mixer) and the HUD font.
@@ -27,6 +29,7 @@ import moderngl
 
 from audio.analyzer import AudioAnalyzer
 from audio.player import AudioPlayer
+from gfx.camera import OrbitCamera
 from gfx.renderer import GLRenderer
 from gfx.controls import ControlPanel, EFFECTS, EQ_BANDS
 from visuals import mesh as meshlib
@@ -42,6 +45,7 @@ FADE = 0.30            # trail decay per frame (higher = shorter trails)
 BLOOM_INTENSITY = 0.9
 
 DEFAULT_VISUAL = "primitive:torus"   # shown at launch and on U / « Retour au tore »
+DOUBLE_CLICK_S = 0.35                # two clicks closer than this = double-click
 
 
 # ── T4: attack/release envelopes ────────────────────────────────────────────
@@ -151,8 +155,9 @@ class Hud:
     def build(self, features, tempo, paused, mode, n):
         line = (f"BPM {tempo:.0f}  |  RMS {features['rms']:.2f}  |  "
                 f"BASS {features['bass']:.2f}  |  {(mode or '…').upper()}  |  {n} pts")
-        hint = ("SPACE pause   F plein écran   molette zoom   ESC quitter"
-                "   U retour au tore   dépose un modèle 3D")
+        hint = ("SPACE pause   F plein écran   Cmd/Ctrl+glisser orbite   "
+                "Maj+glisser déplacer   molette zoom   C vue de départ   "
+                "U tore   ESC quitter")
         if paused:
             line += "   [PAUSED]"
         key = (line, hint)
@@ -214,6 +219,11 @@ def main():
     glfw.set_key_callback(window, lambda w, key, sc, action, mods:
                           events.append(("key", key)) if action == glfw.PRESS else None)
     glfw.set_scroll_callback(window, lambda w, dx, dy: events.append(("wheel", dy)))
+    glfw.set_mouse_button_callback(window, lambda w, button, action, mods:
+                                   events.append(("button", (button, action, mods,
+                                                             glfw.get_cursor_pos(w)))))
+    glfw.set_cursor_pos_callback(window, lambda w, x, y:
+                                 events.append(("cursor", (x, y))))
     glfw.set_drop_callback(window, lambda w, paths:
                            events.extend(("drop", p) for p in paths))
     windowed_geom = None     # (x, y, w, h) to restore after fullscreen
@@ -336,7 +346,12 @@ def main():
         print("\nNo source — pick a file or a live input in the Source tab.\n")
 
     running = True
-    wheel_zoom = 1.0     # multiplied with the panel's Zoom slider
+    camera = OrbitCamera()   # T26: orbit / pan / zoom with the mouse
+    if panel.camera_state:
+        camera.load_state(panel.camera_state)
+    drag = None              # (mode "orbit" | "pan", mouse button) while dragging
+    cursor = None            # last cursor position (logical px)
+    last_click = (-1.0, 0.0, 0.0)   # time, x, y of the last plain left click
     axis_precession = 0.0   # accumulated axis spin around the world vertical
     beat_env = 0.0          # beat flash envelope (spikes on beat, fast decay)
     envelope = Envelope()   # T4: attack/release smoothing of the features
@@ -361,8 +376,41 @@ def main():
                     load_visual(DEFAULT_VISUAL)
                 elif val == glfw.KEY_F:
                     toggle_fullscreen()
+                elif val == glfw.KEY_C:
+                    camera.reset()
             elif kind == "wheel":
-                wheel_zoom = max(0.2, min(4.0, wheel_zoom * (1.06 ** val)))
+                camera.zoom_by(val)
+            elif kind == "button":
+                button, action, mods, cursor = val
+                if action == glfw.PRESS and drag is None:
+                    shift = mods & glfw.MOD_SHIFT
+                    cmd = mods & (glfw.MOD_SUPER | glfw.MOD_CONTROL)
+                    if button == glfw.MOUSE_BUTTON_MIDDLE or (
+                            button == glfw.MOUSE_BUTTON_LEFT and (shift or cmd)):
+                        drag = ("pan" if shift else "orbit", button)
+                        if drag[0] == "orbit":
+                            camera.begin_orbit()
+                    elif button == glfw.MOUSE_BUTTON_LEFT:
+                        t_click = glfw.get_time()
+                        if (t_click - last_click[0] < DOUBLE_CLICK_S
+                                and abs(cursor[0] - last_click[1]) < 6
+                                and abs(cursor[1] - last_click[2]) < 6):
+                            camera.reset()
+                            t_click = -1.0   # a third click starts over
+                        last_click = (t_click, *cursor)
+                elif (action == glfw.RELEASE and drag is not None
+                        and button == drag[1]):
+                    if drag[0] == "orbit":
+                        camera.end_orbit()
+                    drag = None
+            elif kind == "cursor":
+                if drag is not None and cursor is not None:
+                    dx, dy = val[0] - cursor[0], val[1] - cursor[1]
+                    if drag[0] == "orbit":
+                        camera.orbit(dx, dy)
+                    else:
+                        camera.pan(dx, dy)
+                cursor = val
             elif kind == "drop":
                 load_visual(val)
         events.clear()
@@ -507,6 +555,8 @@ def main():
         # ── GPU draw pass (T1: stateless physics, the CPU only sends uniforms) ──
         p2 = dict(p)
         p2["fx_rot"] = fx["Vitesse rotation"]
+        if p["music_spin"] < 0.5:   # T26: freeze the model to explore it
+            p2["rot_gain"] = 0.0
         p2["inflate"] = p["inflate"] + fx["Gonflement"]
         # no motion unless Turbulence is routed in Physique; the Objet tab
         # slider only scales that routed amount
@@ -528,7 +578,8 @@ def main():
         shake = (sk * 0.5 * (math.sin(t_now * 23.1) + math.sin(t_now * 31.7 + 1.3)),
                  sk * 0.5 * (math.sin(t_now * 27.3 + 0.7) + math.sin(t_now * 19.9)))
         # before set_transform (view matrix)
-        renderer.set_zoom(p["zoom"] * wheel_zoom, shake)
+        camera.update(clock.dt)
+        renderer.set_view(camera.view_matrix(renderer.cam_dist, p["zoom"], shake))
         renderer.set_transform(
             rp["angle"], rp["scale"],
             axis_tilt=p["axis_tilt"] * deg,
@@ -578,7 +629,8 @@ def main():
 
     stop_source()
     model_loader.shutdown(wait=False, cancel_futures=True)
-    panel.save_autosave()   # settings only — audio source and model are not saved
+    panel.camera_state = camera.state()
+    panel.save_autosave()   # settings + camera — audio source and model are not saved
     panel.close()
     glfw.terminate()
     pygame.quit()

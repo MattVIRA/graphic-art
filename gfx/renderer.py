@@ -168,7 +168,7 @@ def _glsl(src: str) -> str:
 GPU_POINT_VS = _glsl("""
 #version 330
 uniform mat4  u_mvp;
-uniform mat4  u_model;       // model rotation (normals → view space)
+uniform mat4  u_mv;          // model-view (normals → camera space, T26)
 uniform float u_size_scale;
 uniform float u_size_mult;
 uniform float u_time;
@@ -194,7 +194,7 @@ void main() {
     vec3 pos = model_displace(in_pos, n, g);
     // light the cloud like a surface: points facing the camera are
     // brighter, grazing ones get the fresnel rim → reads as a 3D volume
-    float facing = abs(normalize(mat3(u_model) * n).z);
+    float facing = abs(normalize(mat3(u_mv) * n).z);
     vec3 col = in_color * (0.22 + 0.40 * facing);
     col += u_rim_color * pow(1.0 - facing, 3.0) * u_rim * 0.35;
     col *= u_model_gain;
@@ -221,8 +221,7 @@ void main() {
 MESH_VS = _glsl("""
 #version 330
 uniform mat4  u_mvp;
-uniform mat4  u_model;
-uniform float u_view_d;       // camera distance (view = translate(0,0,-d))
+uniform mat4  u_mv;           // model-view: shading happens in camera space
 uniform float u_time;
 uniform float u_inflate;
 uniform float u_mturb;
@@ -246,11 +245,11 @@ out float v_ao;
 void main() {
     float g = u_spectrum[int(in_band + 0.5)];
     vec3 p = model_displace(in_pos, in_normal, g);
-    v_normal = mat3(u_model) * in_normal;
+    v_normal = mat3(u_mv) * in_normal;
     v_color = in_color;
     v_uv = in_uv;
     v_ao = in_ao;
-    vec3 vp = (u_model * vec4(p, 1.0)).xyz - vec3(0.0, 0.0, u_view_d);
+    vec3 vp = (u_mv * vec4(p, 1.0)).xyz;
     v_view = -vp;
     gl_Position = u_mvp * vec4(p, 1.0);
     gl_Position.z += u_depth_bias * gl_Position.w;
@@ -909,14 +908,15 @@ class GLRenderer:
                  @ _translate(orbit_dist, 0.0, 0.0)
                  @ _rotate_x(obj_tilt)
                  @ _scale(scale))
-        mvp = self._proj @ self._view @ model
+        mv = self._view @ model
+        mvp = self._proj @ mv
         # GL expects column-major → transpose the row-major numpy matrix
         mvp_bytes = mvp.T.astype("f4").tobytes()
-        model_bytes = model.T.astype("f4").tobytes()
+        mv_bytes = mv.T.astype("f4").tobytes()
         for prog in self._model_progs:
             prog["u_mvp"].write(mvp_bytes)
-            if "u_model" in prog._members:
-                prog["u_model"].write(model_bytes)
+            if "u_mv" in prog._members:
+                prog["u_mv"].write(mv_bytes)
 
     def set_post_params(self, brightness=1.0, gain=(1.0, 1.0, 1.0), contrast=1.0,
                         invert=0.0, grain=0.0, time=0.0,
@@ -935,14 +935,18 @@ class GLRenderer:
         p["u_grain"].value = float(grain)
         p["u_time"].value = float(time)
 
+    def set_view(self, view: np.ndarray):
+        """Camera (T26): 4×4 view matrix, e.g. gfx.camera.OrbitCamera.
+        view_matrix(self.cam_dist, …). Call before set_transform. The studio
+        lights live in camera space: they follow the camera, like the
+        default solid view of a 3D package."""
+        self._view = np.asarray(view, dtype=np.float64)
+
     def set_zoom(self, zoom: float, shake=(0.0, 0.0)):
-        """Camera zoom: >1 gets closer, <1 pulls back. shake: small camera
-        offset (px) for the routed « Secousse caméra » effect."""
+        """Fixed front camera (no orbit): >1 gets closer, <1 pulls back.
+        shake: small screen offset (px), « Secousse caméra »."""
         z = max(zoom, 0.05)
-        self._view = _translate(shake[0], shake[1], -self.cam_dist / z)
-        for prog in self._model_progs:
-            if "u_view_d" in prog._members:
-                prog["u_view_d"].value = float(self.cam_dist / z)
+        self.set_view(_translate(shake[0], shake[1], -self.cam_dist / z))
 
     def draw_grid(self):
         """Draw the static world grid into the accumulation buffer."""

@@ -5,6 +5,7 @@ comparer la qualité d'image avant / après une modification du renderer.
     python tools/snapshot.py                       # toutes les scènes
     python tools/snapshot.py --visual primitive:torus --tag avant
     python tools/snapshot.py --visual inputs/3D_models/x/scene.gltf
+    python tools/snapshot.py --orbit 40,25 --grid   # caméra orbitale (T26)
 
 Sortie : captures/bench/<tag>/<scène>.png (+ temps GPU moyen par frame).
 Les features audio sont synthétiques et déterministes (silence / fort) ;
@@ -22,6 +23,7 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from gfx.camera import OrbitCamera           # noqa: E402
 from gfx.controls import DEFAULTS            # noqa: E402
 from gfx.renderer import GLRenderer          # noqa: E402
 from visuals import mesh as meshlib          # noqa: E402
@@ -48,7 +50,8 @@ def features(level: float, t: float) -> dict:
     }
 
 
-def render_scene(ctx, renderer, particles, p, level, frames=45):
+def render_scene(ctx, renderer, particles, p, level, camera, grid=False,
+                 frames=45):
     """Render `frames` frames (trails settle) and return the last one + ms/frame."""
     times = []
     for i in range(frames):
@@ -63,13 +66,15 @@ def render_scene(ctx, renderer, particles, p, level, frames=45):
                                 ao=p["ao"], wire_width=p["wire_width"])
         renderer.bloom_threshold = p["bloom_threshold"]
         renderer.vignette = p["vignette"]
-        renderer.set_zoom(p["zoom"])
+        renderer.set_view(camera.view_matrix(renderer.cam_dist, p["zoom"]))
         deg = np.pi / 180.0
         renderer.set_transform(0.6 + t * 0.4, rp["scale"],
                                axis_tilt=p["axis_tilt"] * deg,
                                obj_tilt=p["obj_tilt"] * deg)
         t0 = time.perf_counter()
         renderer.begin_frame()
+        if grid:
+            renderer.draw_grid()
         style = int(p["model_style"])
         if style > 0 and renderer.has_mesh:
             renderer.draw_model_mesh(rp, style)
@@ -92,7 +97,16 @@ def main():
                     help="densité de pixels de la sortie (2 = Retina)")
     ap.add_argument("--scale", type=float, default=None,
                     help="super-échantillonnage (défaut : celui du panneau)")
+    ap.add_argument("--orbit", default=None, metavar="LACET,TANGAGE",
+                    help="position de la caméra orbitale en degrés (T26)")
+    ap.add_argument("--grid", action="store_true", help="dessiner la grille")
     args = ap.parse_args()
+
+    camera = OrbitCamera()
+    if args.orbit:
+        yaw, pitch = (float(v) for v in args.orbit.split(","))
+        camera.load_state({"yaw": np.radians(yaw), "pitch": np.radians(pitch),
+                           "target": [0.0, 0.0, 0.0], "zoom": 1.0})
 
     out_dir = os.path.join("captures", "bench", args.tag)
     os.makedirs(out_dir, exist_ok=True)
@@ -119,7 +133,8 @@ def main():
             for level, lname in ((0.0, "silence"), (1.0, "fort")):
                 p["model_style"] = float(style)
                 renderer.fade = p["trail"]
-                img, ms = render_scene(ctx, renderer, particles, p, level)
+                img, ms = render_scene(ctx, renderer, particles, p, level,
+                                       camera, args.grid)
                 sname = ["points", "surface", "wire"][style]
                 path = os.path.join(out_dir, f"{name}_{sname}_{lname}.png")
                 img.save(path)

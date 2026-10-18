@@ -42,7 +42,9 @@ python main.py --visual modele.glb
 python main.py --visual primitive:torus
 ```
 
-**Raccourcis** : `Espace` pause · `F` plein écran · molette zoom · `U` retour à l'étoile · `Échap` quitter. Tu peux aussi glisser-déposer une image ou un modèle dans la fenêtre.
+**Raccourcis** : `Espace` pause · `F` plein écran · `U` retour au tore · `Échap` quitter. Tu peux aussi glisser-déposer un modèle 3D dans la fenêtre.
+
+**Caméra** : `⌘`/`Ctrl` + glisser (ou bouton du milieu) pour tourner autour du modèle · `Maj` + glisser pour se déplacer · molette pour zoomer · `C` ou double-clic pour revenir à la vue de départ. La case « Rotation musicale » (onglet Rotation) arrête le modèle pour l'explorer.
 
 ### Capturer le son d'une appli
 

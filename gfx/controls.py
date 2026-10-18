@@ -65,6 +65,7 @@ DEFAULTS = {
     "wire_hidden": 0.0,    # wireframe: hide the edges behind the surface
     # ── Rotation (fixed scene parameters — music only drives the spin) ──
     "rot_gain":     1.0,   # spin speed multiplier         0 .. 3
+    "music_spin":   1.0,   # T26: 0 = the model stops spinning (to explore it)
     "axis_tilt":    15.0,  # rotation axis tilt from vertical (deg)  0 .. 90
     "axis_azimuth": 0.0,   # rotation axis azimuth (deg)             0 .. 360
     "orbit_dist":   0.0,   # object distance to the axis (px) → orbit radius
@@ -836,6 +837,15 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                    "ne pilote que la vitesse de rotation.",
               style="Muted.TLabel", justify="left"
               ).pack(anchor="w", padx=14, pady=(0, 2))
+    add_check(tab_rot, "Rotation musicale", "music_spin", pady=(6, 0))
+    rot_hint = ttk.Label(
+        tab_rot, text="Souris dans la fenêtre : ⌘/Ctrl + glisser = orbite,\n"
+                      "Maj + glisser = déplacer, C ou double-clic = vue\n"
+                      "de départ. Décocher pour explorer un modèle immobile.",
+        style="Muted.TLabel", justify="left")
+    rot_hint.pack(anchor="w", padx=14, pady=(2, 4))
+    Tooltip(rot_hint, "La caméra tourne autour de la scène ; le modèle garde\n"
+                      "sa propre rotation musicale (réglée ci-dessous).")
     add_sliders(tab_rot, ROTATION_SLIDERS)
 
     add_check(tab_rot, "Rotation de l'axe autour du (0,0) du décor",
@@ -1032,6 +1042,7 @@ class ControlPanel:
         auto = auto if isinstance(auto, dict) else {}
         self.params.update({k: float(v) for k, v in auto.items() if k in DEFAULTS})
         self.window_geometry = presets.get("_window") or None
+        self.camera_state = presets.get("_camera")   # T26, autosave only
         self.actions = []            # pending ("name", payload) actions
         self._q = mp.Queue()
         self._mon_q = mp.Queue(maxsize=4)   # main → panel monitoring (T8)
@@ -1048,6 +1059,8 @@ class ControlPanel:
             d["_autosave"] = {k: float(v) for k, v in self.params.items()}
             if self.window_geometry:
                 d["_window"] = self.window_geometry
+            if self.camera_state:
+                d["_camera"] = self.camera_state
         try:
             store.update(put)
         except OSError as e:
