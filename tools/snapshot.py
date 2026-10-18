@@ -27,7 +27,7 @@ from gfx.camera import OrbitCamera  # noqa: E402
 from gfx.controls import DEFAULTS  # noqa: E402
 from gfx.renderer import GLRenderer  # noqa: E402
 from visuals import mesh as meshlib  # noqa: E402
-from visuals.particles import ParticleSystem  # noqa: E402
+from visuals.model_source import ModelSource  # noqa: E402
 
 W, H = 1280, 720
 N_MELS = 64
@@ -123,7 +123,7 @@ def main():
 
     p = dict(DEFAULTS)
     for vis in args.visual or ["primitive:torus"]:
-        particles = ParticleSystem(W, H)
+        particles = ModelSource(W, H)
         name = os.path.splitext(os.path.basename(vis.replace("primitive:", "")))[0]
         particles.set_model(meshlib.prepare(vis, 0, particles.model_radius,
                                             particles.max_points), 0)

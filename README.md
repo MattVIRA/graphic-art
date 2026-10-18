@@ -63,16 +63,17 @@ macOS n'expose pas la sortie d'une appli précise. Route-la vers [BlackHole](htt
 ## Structure
 
 ```
-main.py        boucle principale, routing, caméra
+main.py        assemblage : fenêtre, boucle, actions (classe App)
+app/           sources audio, chargement des modèles, routing, souris, dessin d'une frame
 audio/         analyse du fichier, lecture, analyse live
-visuals/       particules, chargement des modèles 3D
+visuals/       modèle 3D affiché, chargement des modèles 3D
 gfx/           rendu moderngl, panneau tkinter, matcaps
 presets.default.json   presets de départ (presets.json, local, n'est pas versionné)
 tests/         tests pytest
 pyproject.toml           règles ruff ; .pre-commit-config.yaml : contrôle au commit
 ```
 
-`audio/` ne connaît ni `visuals/` ni `gfx/` : `main.py` fait le lien.
+`audio/` ne connaît ni `visuals/` ni `gfx/` : `main.py` et `app/` font le lien.
 
 ## Feuille de route
 

@@ -15,7 +15,9 @@ uniforms.
 from visuals import mesh
 
 
-class ParticleSystem:
+class ModelSource:
+    """Le modèle 3D affiché : buffers GPU, rotation musicale, uniforms par frame."""
+
     def __init__(self, width: int, height: int, max_points: int = 1_000_000):
         self.w = width
         self.h = height
