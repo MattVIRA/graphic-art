@@ -1,16 +1,14 @@
 """
 Graphic Art — GPU Audio Visualizer
-Usage: python main.py [audio_file] [--visual FILE] [--particles N]
+Usage: python main.py [audio_file] [--visual FILE]
 
-Visual source (picked from the file extension, also via drag & drop / panel):
-  none                    → generative star (particles encode the FFT)
-  --visual photo.png      → image: particles on the picture, react to the music
-  --visual model.glb      → 3D model (.glb .gltf .obj .stl .ply): points,
-                            surface or wireframe (style chosen in the panel)
-  --visual primitive:torus  → built-in test shape (icosphere, torus, box)
-  (--image is kept as an alias of --visual)
+Visual: a 3D model (.glb .gltf .obj .stl .ply), also via drag & drop / panel,
+drawn as points, surface or wireframe (style chosen in the panel).
+  none                      → the built-in torus (DEFAULT_VISUAL)
+  --visual model.glb        → that model
+  --visual primitive:box    → another built-in shape (icosphere, torus, box)
 
-Keys: SPACE pause/resume  |  ESC quit  |  U back to the star  |  F fullscreen
+Keys: SPACE pause/resume  |  ESC quit  |  U back to the torus  |  F fullscreen
 
 The window is a GLFW window (native Retina framebuffer); pygame only provides
 the audio playback (mixer) and the HUD font.
@@ -30,7 +28,7 @@ import moderngl
 from audio.analyzer import AudioAnalyzer
 from audio.player import AudioPlayer
 from gfx.renderer import GLRenderer
-from gfx.controls import ControlPanel, EFFECTS, EQ_BANDS, SCOPABLE_EFFECTS
+from gfx.controls import ControlPanel, EFFECTS, EQ_BANDS
 from visuals import mesh as meshlib
 from visuals.particles import ParticleSystem
 
@@ -43,7 +41,7 @@ BG_COLOR = (4, 4, 10)
 FADE = 0.30            # trail decay per frame (higher = shorter trails)
 BLOOM_INTENSITY = 0.9
 
-SUPPORTED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif"}
+DEFAULT_VISUAL = "primitive:torus"   # shown at launch and on U / « Retour au tore »
 
 
 # ── T4: attack/release envelopes ────────────────────────────────────────────
@@ -152,10 +150,9 @@ class Hud:
 
     def build(self, features, tempo, paused, mode, n):
         line = (f"BPM {tempo:.0f}  |  RMS {features['rms']:.2f}  |  "
-                f"BASS {features['bass']:.2f}  |  {mode.upper()}  |  {n} pts")
+                f"BASS {features['bass']:.2f}  |  {(mode or '…').upper()}  |  {n} pts")
         hint = ("SPACE pause   F plein écran   molette zoom   ESC quitter"
-                + ("   U back to star" if mode != "star"
-                   else "   drop an image or a 3D model"))
+                "   U retour au tore   dépose un modèle 3D")
         if paused:
             line += "   [PAUSED]"
         key = (line, hint)
@@ -181,11 +178,8 @@ def main():
     parser = argparse.ArgumentParser(description="Graphic Art — GPU Audio Visualizer")
     parser.add_argument("audio", nargs="?", default=None,
                         help="Audio file (optional — sources can be picked in the panel)")
-    parser.add_argument("--visual", "--image", dest="visual", metavar="FILE",
-                        default=None,
-                        help="Image or 3D model to load (or primitive:torus)")
-    parser.add_argument("--particles", type=int, default=50000, metavar="N",
-                        help="Number of particles in generative mode (default 50000)")
+    parser.add_argument("--visual", metavar="FILE", default=DEFAULT_VISUAL,
+                        help="3D model to load (default: primitive:torus)")
     args = parser.parse_args()
 
     if args.audio and not os.path.isfile(args.audio):
@@ -244,17 +238,13 @@ def main():
 
     ctx = moderngl.create_context()
 
-    # ── GPU renderer + particles ─────────────────────────────────────────────
-    max_particles = max(args.particles, 90000)
-    renderer = GLRenderer(ctx, (WIDTH, HEIGHT), max_particles,
-                          bg_color=BG_COLOR, fade=FADE, bloom_intensity=BLOOM_INTENSITY)
+    # ── GPU renderer + 3D model ──────────────────────────────────────────────
+    renderer = GLRenderer(ctx, (WIDTH, HEIGHT), bg_color=BG_COLOR, fade=FADE,
+                          bloom_intensity=BLOOM_INTENSITY)
     renderer.set_pixel_ratio(pixel_ratio())
-    # T1: with GPU physics every image pixel can be a particle (≤ ~1M);
-    # the CPU fallback keeps the old 90k budget
-    max_image = 1_000_000 if renderer.gpu_prog is not None else 90_000
-    particles = ParticleSystem(WIDTH, HEIGHT, n_generative=args.particles,
-                               max_image=max_image, n_mels=AudioAnalyzer.N_MELS)
-    gpu_rev = -1     # last particle revision uploaded to the GPU
+    max_points = 1_000_000       # upper bound of the « Nombre de points » slider
+    particles = ParticleSystem(WIDTH, HEIGHT, max_points=max_points)
+    gpu_rev = -1     # last model revision uploaded to the GPU
 
     # ── Audio source (file player or live analyzer), switchable at runtime ──
     source = None          # object exposing get_current_features/toggle_pause/stop
@@ -314,43 +304,30 @@ def main():
     hud = Hud(WIDTH, renderer.dpr)
     panel = ControlPanel()   # second window with live sliders
 
-    # ── Visual source: star / image / 3D model, chosen by file extension ──
-    # Models are parsed in a worker thread so the animation keeps running.
+    # ── Visual: a 3D model, parsed in a worker thread so the animation keeps
+    # running (the current model stays on screen until the new one is ready) ──
     model_loader = ThreadPoolExecutor(max_workers=1)
-    pending_model = None     # (path, Future) of the model being prepared
+    pending_model = None     # (path, up, Future) of the model being prepared
 
     def load_visual(path):
         nonlocal pending_model
-        ext = os.path.splitext(path)[1].lower()
-        is_primitive = path.startswith("primitive:")
-        if not is_primitive and not os.path.isfile(path):
+        if not path.startswith("primitive:") and not os.path.isfile(path):
             print(f"[warning] File not found: {path}")
             return
-        if ext in SUPPORTED_IMAGE_EXT:
-            pending_model = None         # a late model must not replace it
-            particles.load_image(path)
-        elif meshlib.is_model_path(path):
-            if renderer.gpu_prog is None:
-                print("[warning] 3D models need the GPU particle path")
-                return
-            print(f"  Loading model: {path} …")
-            up = int(panel.params["model_up"])
-            # the up axis travels with the job: if the panel changes it
-            # meanwhile, gpu_uniforms() sees the mismatch and rebuilds
-            pending_model = (path, up, model_loader.submit(
-                meshlib.prepare, path, up,
-                particles.model_radius, particles.max_image))
-        else:
-            print(f"[warning] Unsupported format: {ext or path} — images "
-                  f"{sorted(SUPPORTED_IMAGE_EXT)}, models {sorted(meshlib.MODEL_EXT)}")
+        if not meshlib.is_model_path(path):
+            ext = os.path.splitext(path)[1].lower()
+            print(f"[warning] Unsupported format: {ext or path} — 3D models "
+                  f"{sorted(meshlib.MODEL_EXT)}")
+            return
+        print(f"  Loading model: {path} …")
+        up = int(panel.params["model_up"])
+        # the up axis travels with the job: if the panel changes it
+        # meanwhile, gpu_uniforms() sees the mismatch and rebuilds
+        pending_model = (path, up, model_loader.submit(
+            meshlib.prepare, path, up,
+            particles.model_radius, particles.max_points))
 
-    def unload_visual():
-        nonlocal pending_model
-        pending_model = None
-        particles.unload(n_generative=args.particles)
-
-    if args.visual:
-        load_visual(args.visual)
+    load_visual(args.visual)
 
     # ── Play ─────────────────────────────────────────────────────────────────
     if args.audio:
@@ -381,7 +358,7 @@ def main():
                     if source is not None:
                         source.toggle_pause()
                 elif val == glfw.KEY_U:
-                    unload_visual()
+                    load_visual(DEFAULT_VISUAL)
                 elif val == glfw.KEY_F:
                     toggle_fullscreen()
             elif kind == "wheel":
@@ -418,8 +395,8 @@ def main():
         for name, payload in panel.pop_actions():
             if name == "load_visual" and payload:
                 load_visual(payload)
-            elif name == "unload_image":
-                unload_visual()
+            elif name == "default_visual":
+                load_visual(DEFAULT_VISUAL)
             elif name == "load_audio" and payload:
                 start_file(payload)
             elif name == "start_live":
@@ -432,8 +409,8 @@ def main():
 
         # ── particle budget: rebuild ~0.5 s after the slider settles ──
         t_now = glfw.get_time()
-        want_budget = min(int(p["n_points"]) * 1000, max_image)
-        if want_budget != particles.max_image:
+        want_budget = min(int(p["n_points"]) * 1000, max_points)
+        if want_budget != particles.max_points:
             if budget_wanted != want_budget:
                 budget_wanted, budget_t = want_budget, t_now
             elif t_now - budget_t > 0.5:
@@ -483,27 +460,9 @@ def main():
                                               section]
         # macro-dynamics: every routed effect is damped in calm sections
         dyn_gain = 1.0 - p.get("dynamics", 0.0) * 0.75 * (1.0 - section)
-        # scopable effects can target the subject (fx_fg) or the décor (fx_bg)
-        fx_fg = {name: 0.0 for name in SCOPABLE_EFFECTS}
-        fx_bg = {name: 0.0 for name in SCOPABLE_EFFECTS}
         for i in range(len(EQ_BANDS)):
             eff = EFFECTS[int(p[f"band{i}_fx"])]
-            val = float(bands[i]) * p[f"band{i}_amt"] * dyn_gain
-            sc_i = int(p.get(f"band{i}_scope", 0.0))
-            if eff in SCOPABLE_EFFECTS and sc_i == 1:
-                fx_fg[eff] += val
-            elif eff in SCOPABLE_EFFECTS and sc_i == 2:
-                fx_bg[eff] += val
-            else:
-                fx[eff] += val
-        renderer.set_scoped_fx(
-            size_fg=1.0 + fx_fg["Taille points"] * 0.6,
-            size_bg=1.0 + fx_bg["Taille points"] * 0.6,
-            bright_fg=1.0 + fx_fg["Luminosité"] * 0.8,
-            bright_bg=1.0 + fx_bg["Luminosité"] * 0.8,
-            turb_fg=1.0 + fx_fg["Turbulence"],
-            turb_bg=1.0 + fx_bg["Turbulence"],
-        )
+            fx[eff] += float(bands[i]) * p[f"band{i}_amt"] * dyn_gain
 
         # ── T8: monitoring packet for the panel (VU meters + status bar) ──
         now = glfw.get_time()
@@ -521,27 +480,7 @@ def main():
                 "bpm": float(features.get("bpm", 0.0) or hud_tempo),
                 "fps": clock.fps,
                 "source": src_label,
-                "visual": particles.mode,   # greys out the unused Objet group
             })
-
-        # ── scoped color sliders: full frame (composite), subject-only or
-        # background-only (per-particle in the shader) ──
-        def scoped(key, neutral=1.0):
-            s = int(p.get(f"{key}_scope", 0.0))
-            v = p[key]
-            return (v if s == 0 else neutral,     # composite (post)
-                    v if s == 1 else neutral,     # subject
-                    v if s == 2 else neutral)     # background
-        r_post, r_fg, r_bg = scoped("red")
-        g_post, g_fg, g_bg = scoped("green")
-        b_post, b_fg, b_bg = scoped("blue")
-        br_post, br_fg, br_bg = scoped("brightness")
-        con_post, con_fg, con_bg = scoped("contrast")
-        neg_post, neg_fg, neg_bg = scoped("negative", 0.0)
-        tint_fg = (r_fg * br_fg, g_fg * br_fg, b_fg * br_fg)
-        tint_bg = (r_bg * br_bg, g_bg * br_bg, b_bg * br_bg)
-        renderer.set_scoped_colors(tint_fg, tint_bg, con_fg, con_bg,
-                                   neg_fg, neg_bg)
 
         # apply live control-panel parameters (+ routed effects)
         renderer.fade = p["trail"] * max(0.12, 1.0 - min(fx["Trainées"], 1.2) * 0.75)
@@ -553,11 +492,11 @@ def main():
         renderer.set_size_mult(p["point_size"] * (1.0 + fx["Taille points"] * 0.6))
         sh = 0.012
         renderer.set_post_params(
-            brightness=br_post * (1.0 + fx["Luminosité"] * 0.8)
+            brightness=p["brightness"] * (1.0 + fx["Luminosité"] * 0.8)
                        * (1.0 + beat_env * 0.18),   # subtle flash on each beat
-            gain=(r_post, g_post, b_post),
-            contrast=con_post,
-            invert=neg_post,
+            gain=(p["red"], p["green"], p["blue"]),
+            contrast=p["contrast"],
+            invert=p["negative"],
             grain=p["grain"],
             time=glfw.get_time(),
             shift_r=(fx["Décalage rouge"] * sh, 0.0),
@@ -565,31 +504,18 @@ def main():
             shift_b=(-fx["Décalage bleu"] * sh, 0.0),
         )
 
-        # ── GPU draw pass ──
+        # ── GPU draw pass (T1: stateless physics, the CPU only sends uniforms) ──
         p2 = dict(p)
-        p2["turbulence"] = p["turbulence"] + fx["Turbulence"]
         p2["fx_rot"] = fx["Vitesse rotation"]
         p2["inflate"] = p["inflate"] + fx["Gonflement"]
-        # 3D model: no motion unless Turbulence is routed in Physique; the
-        # Objet tab slider only scales that routed amount
-        p2["model_turb"] = p["turbulence"] * (fx["Turbulence"]
-                                              + fx_fg["Turbulence"])
-        if renderer.gpu_prog is not None:
-            # T1: stateless physics in the vertex shader — CPU only sends uniforms
-            rp = particles.gpu_uniforms(features, p2,
-                                        time_s=glfw.get_time())
-            if particles.rev != gpu_rev:
-                renderer.upload_particle_static(*particles.build_static())
-                renderer.upload_mesh(particles.model_mesh
-                                     if particles.mode == "model" else None)
-                gpu_rev = particles.rev
-            out, count = None, 0
-        else:
-            import numpy as _np
-            p2["_scope"] = (_np.array(tint_fg, dtype=_np.float32),
-                            _np.array(tint_bg, dtype=_np.float32),
-                            con_fg, con_bg, neg_fg, neg_bg)
-            out, count, rp = particles.update(features, p2)
+        # no motion unless Turbulence is routed in Physique; the Objet tab
+        # slider only scales that routed amount
+        p2["model_turb"] = p["turbulence"] * fx["Turbulence"]
+        rp = particles.gpu_uniforms(features, p2, time_s=glfw.get_time())
+        if particles.rev != gpu_rev:
+            renderer.upload_particle_static(*particles.build_static())
+            renderer.upload_mesh(particles.model_mesh)
+            gpu_rev = particles.rev
         rp["scale"] *= 1.0 + fx["Zoom (pulse)"] * 0.25
         deg = 3.14159265 / 180.0
         # axis precession: the rotation axis itself spins around the scene's
@@ -618,8 +544,7 @@ def main():
         model_style = int(p["model_style"])   # 0 points, 1 surface, 2 wireframe
         rim = p["rim"] + max(fx["Rim"], 0.0) * 1.5
         light = max(0.15, 1.0 + fx["Lumière"] * 0.8)
-        if (particles.mode == "model" and model_style > 0
-                and renderer.has_mesh):
+        if model_style > 0 and renderer.has_mesh:
             renderer.set_model_look(matcap=p["matcap"], rim=rim,
                                     rim_hue=p["rim_hue"], orig=p["orig_color"],
                                     transparent=p["mesh_transparent"] >= 0.5,
@@ -629,11 +554,9 @@ def main():
             renderer.draw_model_mesh(rp, model_style,
                                      sharp_only=p["wire_sharp"] >= 0.5,
                                      hide_hidden=p["wire_hidden"] >= 0.5)
-        elif renderer.gpu_prog is not None:
+        else:
             renderer.set_model_look(rim=rim, rim_hue=p["rim_hue"], light=light)
             renderer.draw_particles_gpu(rp)
-        else:
-            renderer.draw_particles(out, count)
         renderer.end_frame()
 
         # the HUD texture is re-uploaded at most 5×/s and only when its text
@@ -655,7 +578,7 @@ def main():
 
     stop_source()
     model_loader.shutdown(wait=False, cancel_futures=True)
-    panel.save_autosave()   # settings only — source and image are not saved
+    panel.save_autosave()   # settings only — audio source and model are not saved
     panel.close()
     glfw.terminate()
     pygame.quit()

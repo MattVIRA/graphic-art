@@ -89,14 +89,9 @@ DEFAULTS = {
     "zoom":        1.0,    # camera zoom (also mouse wheel)   0.3 .. 3
     "reactivity":  1.0,    # T4: release scaling — high = percussive, low = floaty
     "show_grid":   1.0,    # 1 = draw the static world grid
-    # ── Image ──
-    "hide_bg":     1.0,    # 1 = only the cut-out subject is drawn
-    "curve_mode":  0.0,    # 1 = abstract line-art curves instead of points
-    "turbulence":  1.0,    # particle agitation multiplier
-    "depth":       0.5,    # z range of the image points (0 = flat layer)
-    "n_points":    1000.0, # particle budget in thousands (image mode)
-    "edge_boost":  1.0,    # outline emphasis: 0 = off, 2 = very marked
-    # ── Modèle 3D (T19) ──
+    # ── Objet : modèle 3D (T19) ──
+    "turbulence":  1.0,    # dose of the routed Turbulence effect
+    "n_points":    1000.0, # point budget in thousands (style Points)
     "model_style": 1.0,    # index in MODEL_STYLES (1 = Surface)
     "model_up":    0.0,    # index in visuals.mesh.UP_AXES
     "shading":     0.0,    # index in SHADING_MODES (0 = Studio PBR)
@@ -149,25 +144,11 @@ EFFECTS = [
     "Secousse caméra",
 ]
 
-# Effects that can target the subject or the background only (per-particle);
-# the others (chromatic shifts, trails, zoom, rotation) are full-frame.
-SCOPABLE_EFFECTS = {"Taille points", "Luminosité", "Turbulence"}
-PHYS_SCOPE_OPTIONS = ["Tout", "Objet", "Décor"]
-
 DEFAULTS["dynamics"] = 0.0   # 0 = off, 1 = effets très calmes dans les breaks
 
 for _i in range(len(EQ_BANDS)):
     DEFAULTS[f"band{_i}_fx"] = 0.0    # effect index in EFFECTS (0 = Aucun)
     DEFAULTS[f"band{_i}_amt"] = 1.0   # effect amount 0..2
-    DEFAULTS[f"band{_i}_scope"] = 0.0  # 0 tout, 1 objet, 2 décor
-
-# Color/video sliders that can target the whole frame, the cut-out subject
-# only, or the background only (image mode). <key>_scope: 0 both, 1 objet,
-# 2 décor.
-SCOPE_OPTIONS = ["Décor + objet", "Objet", "Décor"]
-SCOPED_KEYS = ("red", "green", "blue", "contrast", "negative", "brightness")
-for _k in SCOPED_KEYS:
-    DEFAULTS[f"{_k}_scope"] = 0.0
 
 
 def _preset(mapping):
@@ -181,7 +162,7 @@ def _preset(mapping):
 
 
 PHYSICS_PRESETS = {
-    # neutral: the built-in physics only (bass→size, transients→rotation, …)
+    # neutral: no routing (only the music-driven rotation speed)
     "Défaut": _preset({}),
     "Chromatique": _preset({
         1: ("Décalage rouge", 1.2),      # BASS
@@ -283,23 +264,14 @@ def random_physics_values() -> dict:
         fx = 0 if random.random() < 0.3 else random.randrange(1, len(EFFECTS))
         vals[f"band{i}_fx"] = float(fx)
         vals[f"band{i}_amt"] = _snap(random.uniform(0.3, 1.8), 0.0, 0.05)
-        vals[f"band{i}_scope"] = float(random.randrange(len(PHYS_SCOPE_OPTIONS)))
     return vals
 
 OBJECT_SLIDERS = [
     ("Turbulence", "turbulence", 0.0, 3.0, 0.05,
-     "Image : amplitude de la vague et du drift\n"
-     "Modèle 3D : dose l'effet Turbulence routé\ndans Physique (aucun effet seul)"),
+     "Dose l'effet Turbulence routé dans Physique\n(aucun effet seul)"),
     ("Nombre de points (milliers)", "n_points", 50.0, 1000.0, 25.0,
-     "Budget de particules (image, modèle en points)\n"
+     "Style Points : nombre de points sur la surface\n"
      "— reconstruit ~0,5 s après le réglage"),
-]
-
-IMAGE_SLIDERS = [
-    ("Épaisseur (relief)", "depth", 0.0, 2.0, 0.05,
-     "Profondeur des points : 0 = couche plate,\n2 = relief marqué"),
-    ("Intensité contours", "edge_boost", 0.0, 2.0, 0.05,
-     "Les points sur les bords détectés sont\nplus brillants et plus gros"),
 ]
 
 MODEL_STYLES = ["Points", "Surface", "Wireframe"]
@@ -327,9 +299,6 @@ MODEL_SLIDERS = [
 SHADING_MODES = ["Studio (PBR)", "Matcap"]
 
 IMPORT_TYPES = [
-    ("Images et modèles 3D",
-     "*.png *.jpg *.jpeg *.bmp *.webp *.gif *.glb *.gltf *.obj *.stl *.ply"),
-    ("Images", "*.png *.jpg *.jpeg *.bmp *.webp *.gif"),
     ("Modèles 3D", "*.glb *.gltf *.obj *.stl *.ply"),
     ("Tous les fichiers", "*.*"),
 ]
@@ -479,7 +448,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                 self.tip = None
 
     # ── Barre presets utilisateur (globale, au-dessus des onglets) ─────
-    # Un preset = snapshot de TOUS les réglages (source et image exclues :
+    # Un preset = snapshot de TOUS les réglages (source et modèle exclus :
     # ce ne sont pas des paramètres esthétiques).
     preset_bar = ttk.Frame(root)
     preset_bar.pack(fill="x", padx=10, pady=(10, 2))
@@ -582,16 +551,6 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
             return round(round((raw - lo) / step) * step + lo, 6)
 
         ttk.Label(row, text=label).grid(row=0, column=0, sticky="w")
-        if key in SCOPED_KEYS:
-            # target selector: whole frame / subject only / background only
-            sc = ttk.Combobox(row, values=SCOPE_OPTIONS, state="readonly",
-                              width=12, font=("Menlo", 9))
-            sc.current(int(DEFAULTS[f"{key}_scope"]))
-            sc.grid(row=0, column=1, sticky="e", padx=(4, 6))
-            sc.bind("<<ComboboxSelected>>",
-                    lambda e, k=f"{key}_scope", c=sc: send(k, float(c.current())))
-            combos[f"{key}_scope"] = (sc, SCOPE_OPTIONS)
-            Tooltip(sc, "Sur quoi ce réglage s'applique\n(mode image)")
         val_lbl = ttk.Label(row, text="", style="Value.TLabel")
         val_lbl.grid(row=0, column=2, sticky="e")
         var = tk.DoubleVar(value=DEFAULTS[key])
@@ -640,16 +599,6 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
         combos[key] = (c, options)
         if tip:
             Tooltip(c, tip)
-
-    def set_enabled(widget, on: bool):
-        """Grey out / re-enable every ttk widget inside a group."""
-        for w in widget.winfo_children():
-            if isinstance(w, ttk.Widget):
-                try:
-                    w.state(["!disabled"] if on else ["disabled"])
-                except tk.TclError:
-                    pass
-            set_enabled(w, on)
 
     def apply_values(values: dict):
         for key, val in values.items():
@@ -805,20 +754,20 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
     claim_keys("Vidéo")
     tab_presets_ui(tab_video, "Vidéo", {}, pady=(4, 12))
 
-    # ── Onglet Objet (image ou modèle 3D, T19) ────────────────────────
+    # ── Onglet Objet (modèle 3D, T19) ─────────────────────────────────
     tab_obj = make_tab("Objet")
     reset_button(tab_obj, "Objet")
 
     def import_visual():
         path = filedialog.askopenfilename(
-            title="Importer une image ou un modèle 3D", filetypes=IMPORT_TYPES)
+            title="Importer un modèle 3D", filetypes=IMPORT_TYPES)
         if path:
             q.put(("action", "load_visual", path))
 
-    ttk.Button(tab_obj, text="📁  Importer image / modèle 3D…",
+    ttk.Button(tab_obj, text="📁  Importer un modèle 3D…",
                command=import_visual).pack(fill="x", padx=10, pady=(14, 4))
-    ttk.Button(tab_obj, text="↩  Retour mode étoile",
-               command=lambda: q.put(("action", "unload_image", None))
+    ttk.Button(tab_obj, text="↩  Retour au tore",
+               command=lambda: q.put(("action", "default_visual", None))
                ).pack(fill="x", padx=10, pady=(2, 4))
     prim_row = ttk.Frame(tab_obj)
     prim_row.pack(fill="x", padx=10, pady=(2, 2))
@@ -831,15 +780,6 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                        ("action", "load_visual", f"primitive:{k}"))
                    ).pack(side="left", padx=(4, 0))
     add_sliders(tab_obj, OBJECT_SLIDERS)
-
-    grp_img = ttk.LabelFrame(tab_obj, text="Image")
-    grp_img.pack(fill="x", padx=10, pady=(10, 2))
-    add_check(grp_img, "Supprimer le fond (sujet seul)", "hide_bg",
-              pady=(6, 2))
-    add_check(grp_img, "Mode courbes (art abstrait)", "curve_mode",
-              pady=(2, 2))
-    add_sliders(grp_img, IMAGE_SLIDERS)
-    ttk.Frame(grp_img).pack(pady=2)
 
     grp_model = ttk.LabelFrame(tab_obj, text="Modèle 3D")
     grp_model.pack(fill="x", padx=10, pady=(10, 8))
@@ -862,16 +802,6 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
     add_sliders(grp_model, MODEL_SLIDERS)
     ttk.Frame(grp_model).pack(pady=2)
 
-    visual_state = {"mode": None}
-
-    def show_visual_mode(mode):
-        if mode == visual_state["mode"]:
-            return
-        visual_state["mode"] = mode
-        set_enabled(grp_img, mode == "image")
-        set_enabled(grp_model, mode == "model")
-
-    show_visual_mode("star")
     claim_keys("Objet")
 
     # ── Onglet Rotation ───────────────────────────────────────────────
@@ -938,15 +868,6 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                    lambda e, k=f"band{i}_fx", c=combo: send(k, float(c.current())))
         combos[f"band{i}_fx"] = (combo, EFFECTS)
         Tooltip(combo, "Effet piloté par cette bande")
-        sc = ttk.Combobox(head, values=PHYS_SCOPE_OPTIONS, state="readonly",
-                          width=6, font=("Menlo", 9))
-        sc.current(int(DEFAULTS[f"band{i}_scope"]))
-        sc.pack(side="left", padx=(4, 0))
-        sc.bind("<<ComboboxSelected>>",
-                lambda e, k=f"band{i}_scope", c=sc: send(k, float(c.current())))
-        combos[f"band{i}_scope"] = (sc, PHYS_SCOPE_OPTIONS)
-        Tooltip(sc, "Cible de l'effet (Taille points,\nLuminosité, Turbulence "
-                    "uniquement)")
 
         build_slider(blk, "Intensité", f"band{i}_amt", 0.0, 2.0, 0.05)\
             .grid(row=1, column=1, sticky="ew", pady=(2, 0))
@@ -980,7 +901,6 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,
                 f"{'BPM %.0f' % bpm if bpm > 0 else 'BPM --'} · "
                 f"RMS {blocks} · {pkt.get('fps', 0.0):.0f} fps · "
                 f"{pkt.get('source', '—')}"))
-            show_visual_mode(pkt.get("visual", "star"))
         root.after(66, poll_monitor)   # ~15 Hz
 
     poll_monitor()
@@ -1063,7 +983,7 @@ class ControlPanel:
 
     def __init__(self):
         self.params = dict(DEFAULTS)
-        # restore the last session's settings (source and image excluded)
+        # restore the last session's settings (source and model excluded)
         presets = _load_presets_file()
         auto = presets.get("_autosave", {})
         self.params.update({k: float(v) for k, v in auto.items() if k in DEFAULTS})
@@ -1096,7 +1016,7 @@ class ControlPanel:
 
     def poll(self) -> dict:
         """Drain pending messages; return the parameter dict.
-        Actions (e.g. image loads) are queued in `self.actions`."""
+        Actions (e.g. model loads) are queued in `self.actions`."""
         while True:
             try:
                 kind, key, val = self._q.get_nowait()

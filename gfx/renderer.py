@@ -82,23 +82,6 @@ def _rotate_axis(axis, a):
 
 EMISSION_GAIN = 3.0   # additive passes (points, lines) — see GLRenderer.__init__
 
-POINT_VS = """
-#version 330
-uniform mat4 u_mvp;
-uniform float u_size_scale;
-in vec3 in_pos;      // model-space coords (centered, y up, pixel units)
-in vec3 in_color;
-in float in_size;    // base point size in px
-out vec3 v_color;
-void main() {
-    vec4 clip = u_mvp * vec4(in_pos, 1.0);
-    gl_Position = clip;
-    // perspective size scaling: closer particles are bigger
-    gl_PointSize = max(1.0, in_size * u_size_scale / max(clip.w, 0.001));
-    v_color = in_color;
-}
-"""
-
 # Scene colors are computed in display (sRGB-like) space, as the sliders and
 # matcaps were designed, then converted to LINEAR light at the output of every
 # geometry shader: additive blending, bloom and the filmic tone map all work on
@@ -124,17 +107,15 @@ void main() {
 }
 """
 
-# ── T1: stateless GPU particle physics ───────────────────────────────────────
-# Static per-particle attributes are uploaded ONCE; every frame only a handful
-# of audio-feature uniforms change and the vertex shader recomputes the whole
-# physics (displacement, color, size). No CPU work, no per-frame upload.
+# ── Stateless GPU point physics (T1) ─────────────────────────────────────────
+# Static per-point attributes are uploaded ONCE; every frame only a handful
+# of audio-feature uniforms change and the vertex shader recomputes the
+# displacement, color and size. No CPU work, no per-frame upload.
 #
-# Attribute layout (11 floats):
-#   in_pos   vec3 — rest position (image xy,z | curve xy,z | star direction)
-#   in_color vec3 — base color (unused for star: computed from hue in-shader)
-#   in_aux   vec4 — curves: normal.xy, t, band | star: t, band, 0, 0
-#                   image points: edge, 0, 0, 0 | model: normal.xyz, band
-#   in_fg    f    — 1 = cut-out subject, 0 = background
+# Attribute layout (10 floats, see visuals/mesh.build_points):
+#   in_pos   vec3 — rest position on the model surface
+#   in_color vec3 — base color (texture / vertex colors)
+#   in_aux   vec4 — normal.xyz, mel band
 
 # GLSL chunks shared by the point shader and the mesh shaders (T19): pasted
 # in place of the //%NOISE% and //%MODEL% markers.
@@ -190,150 +171,39 @@ uniform mat4  u_mvp;
 uniform mat4  u_model;       // model rotation (normals → view space)
 uniform float u_size_scale;
 uniform float u_size_mult;
-uniform int   u_mode;        // 0 image points, 1 curves, 2 star, 3 3D model
 uniform float u_time;
-uniform float u_angle;
-uniform float u_turb;
-uniform float u_hide_bg;
-uniform float u_bass;
-uniform float u_low_mid;
-uniform float u_mid;
-uniform float u_rms;
-uniform float u_centroid;
-uniform float u_hz10;        // 10-11 kHz  → turbulence amount
-uniform float u_hz11;        // 11-12 kHz  → layout stretch
-uniform float u_hz12;        // 12-14 kHz  → shimmer
-uniform float u_depth;       // relief/épaisseur : scales the points' z range
-uniform float u_edge;        // outline emphasis (0 = off)
-uniform float u_inflate;     // model: inflation along the normal (Gonflement)
-uniform float u_mturb;       // model: routed turbulence (wave + drift)
-uniform float u_model_gain;  // model: brightness compensation for point density
-uniform float u_rim;         // model: fresnel rim intensity
+uniform float u_inflate;     // inflation along the normal (Gonflement)
+uniform float u_mturb;       // routed turbulence (wave + drift)
+uniform float u_model_gain;  // brightness compensation for point density
+uniform float u_rim;         // fresnel rim intensity
 uniform vec3  u_rim_color;
-// per-scope color grading: subject (fg) vs background (bg). Neutral when the
-// corresponding slider targets the whole frame (applied in the composite).
-uniform vec3  u_tint_fg;     // rgb gain × brightness
-uniform vec3  u_tint_bg;
-uniform float u_con_fg;      // contrast
-uniform float u_con_bg;
-uniform float u_neg_fg;      // invert mix
-uniform float u_neg_bg;
-// per-scope routed effects (Physique tab: Objet / Décor)
-uniform float u_szm_fg;      // point-size multiplier
-uniform float u_szm_bg;
-uniform float u_brm_fg;      // brightness multiplier
-uniform float u_brm_bg;
-uniform float u_tbm_fg;      // turbulence multiplier
-uniform float u_tbm_bg;
 uniform float u_spectrum[64];
 
 in vec3  in_pos;
 in vec3  in_color;
 in vec4  in_aux;
-in float in_fg;
 out vec3 v_color;
 
 //%NOISE%
 //%MODEL%
 
-vec3 hsv2rgb(vec3 c) {
-    vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0);
-    return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
-}
-
-vec3 apply_contrast(vec3 c, float m) {
-    return clamp((c - 0.5) * (1.0 + m * 1.3) + 0.5, 0.0, 1.0);
-}
-
 void main() {
-    if (u_hide_bg > 0.5 && u_mode != 2 && in_fg < 0.5) {
-        gl_Position = vec4(4.0, 4.0, 4.0, 1.0);   // outside clip volume → culled
-        gl_PointSize = 0.0;
-        v_color = vec3(0.0);
-        return;
-    }
-
-    vec3 pos;
-    vec3 col;
-    float size;
-
-    if (u_mode == 2) {                       // ── star / sea-urchin
-        int band  = int(in_aux.y + 0.5);
-        float gain = u_spectrum[band];
-        float t    = in_aux.x;
-        float radius = 70.0 * (1.0 + u_bass * 0.7) + t * (60.0 + gain * 260.0);
-        pos = in_pos * radius;
-        float hue = fract(float(band) / 64.0 + u_centroid * 0.3);
-        float val = clamp(0.45 + gain * 0.65 + t * 0.1, 0.0, 1.0);
-        col  = apply_contrast(hsv2rgb(vec3(hue, 0.9, val)), u_mid);
-        size = 2.0 + t * 1.5 + u_bass * 3.0 + u_rms * 1.5;
-
-    } else if (u_mode == 1) {                // ── curves (abstract line art)
-        int band   = int(in_aux.w + 0.5);
-        float wave = u_spectrum[band];
-        float phase = in_aux.z * 34.0 + u_angle * 6.0 + float(band) * 0.7;
-        float disp  = sin(phase) * (3.0 + wave * 42.0 * u_turb);
-        pos = vec3(in_pos.xy + in_aux.xy * disp,
-                   in_pos.z * u_depth);
-        col  = apply_contrast(clamp(in_color * (0.40 + wave * 0.55 + u_rms * 0.15),
-                                    0.0, 1.0), u_mid * 0.5);
-        size = 1.3 + wave * 0.8;
-
-    } else if (u_mode == 3) {                // ── 3D model, points on the surface
-        // no built-in audio reaction: all animation comes from the routing
-        vec3 n = in_aux.xyz;
-        float g = u_spectrum[int(in_aux.w + 0.5)];
-        pos = model_displace(in_pos, n, g);
-        // light the cloud like a surface: points facing the camera are
-        // brighter, grazing ones get the fresnel rim → reads as a 3D volume
-        float facing = abs(normalize(mat3(u_model) * n).z);
-        col = in_color * (0.22 + 0.40 * facing);
-        col += u_rim_color * pow(1.0 - facing, 3.0) * u_rim * 0.35;
-        col *= u_model_gain;
-        size = 1.6;
-
-    } else {                                 // ── image points
-        float spread = 1.0 + u_hz11 * 0.08 * u_turb;
-        // traveling wave across the image (replaces most of the random drift)
-        float ph = (in_pos.x + in_pos.y * 0.6) * 0.010 - u_time * 2.2;
-        float tb = in_fg > 0.5 ? u_tbm_fg : u_tbm_bg;
-        float wv = sin(ph) * (4.0 + u_rms * 30.0 + u_hz10 * 24.0) * u_turb * tb;
-        float amp = u_hz10 * (6.0 + u_rms * 12.0) * u_turb * tb
-                    * (in_fg > 0.5 ? 0.5 : 1.4);
-        vec3 drift = flownoise(in_pos * 0.012 + vec3(u_time * 0.30)) * amp * 0.5;
-        pos = vec3(in_pos.x * spread,
-                   in_pos.y * spread + wv * 0.35,
-                   in_pos.z * u_depth + wv) + drift;
-        col = apply_contrast(in_color, u_mid * 0.6);
-        if (u_hz12 > 0.25) {                 // shimmer, re-seeded ~30×/s
-            float sh = hash11(float(gl_VertexID) + floor(u_time * 30.0) * 0.618);
-            col *= 1.0 - u_hz12 * 0.4 * sh;
-        }
-        col *= (in_fg > 0.5) ? 0.50 + u_bass * 0.22 : 0.26 + u_bass * 0.10;
-        // in_aux.x = edge flag: outline points are brighter and bigger
-        col *= 1.0 + in_aux.x * 0.9 * u_edge;
-        size = 1.5 * (in_fg > 0.5 ? 1.25 : 0.85)
-               * (1.0 + in_aux.x * 0.6 * u_edge);
-    }
-
-    // per-scope color grading (star mode counts as subject)
-    {
-        bool fg = (u_mode == 2) || (in_fg > 0.5);
-        col *= fg ? u_tint_fg : u_tint_bg;
-        float cc = fg ? u_con_fg : u_con_bg;
-        col = clamp((col - 0.5) * cc + 0.5, 0.0, 1.0);
-        float ng = fg ? u_neg_fg : u_neg_bg;
-        col = mix(col, vec3(1.0) - col, ng);
-        // routed effects targeted at the subject / background only
-        col *= fg ? u_brm_fg : u_brm_bg;
-        size *= fg ? u_szm_fg : u_szm_bg;
-    }
+    // no built-in audio reaction: all animation comes from the routing
+    vec3 n = in_aux.xyz;
+    float g = u_spectrum[int(in_aux.w + 0.5)];
+    vec3 pos = model_displace(in_pos, n, g);
+    // light the cloud like a surface: points facing the camera are
+    // brighter, grazing ones get the fresnel rim → reads as a 3D volume
+    float facing = abs(normalize(mat3(u_model) * n).z);
+    vec3 col = in_color * (0.22 + 0.40 * facing);
+    col += u_rim_color * pow(1.0 - facing, 3.0) * u_rim * 0.35;
+    col *= u_model_gain;
 
     vec4 clip = u_mvp * vec4(pos, 1.0);
     gl_Position = clip;
     // sub-pixel points flicker as they cross pixel centers: clamp the sprite
     // to a minimum footprint and dim it to keep the same energy
-    float ps = size * u_size_mult * u_size_scale / max(clip.w, 0.001);
+    float ps = 1.6 * u_size_mult * u_size_scale / max(clip.w, 0.001);
     const float MIN_PS = 1.5;
     if (ps < MIN_PS) {
         col *= (ps * ps) / (MIN_PS * MIN_PS);
@@ -387,20 +257,6 @@ void main() {
 }
 """)
 
-# Shared tail: scoped color grading (the model is always "objet").
-_MESH_GRADE_GLSL = """
-uniform vec3  u_tint_fg;
-uniform float u_con_fg;
-uniform float u_neg_fg;
-uniform float u_brm_fg;
-vec3 grade(vec3 col) {
-    col *= u_tint_fg;
-    col = max((col - 0.5) * u_con_fg + 0.5, 0.0);
-    col = mix(col, max(vec3(1.0) - col, 0.0), u_neg_fg);
-    return col * u_brm_fg;
-}
-"""
-
 # Surface shading. Two looks:
 #  - Studio (default): physically based — Lambert diffuse + GGX specular
 #    (Smith, Schlick Fresnel) from a 3-light photo studio (warm key, cool
@@ -427,7 +283,7 @@ in vec2  v_uv;
 in vec3  v_view;
 in float v_ao;
 out vec4 f_color;
-""" + _MESH_GRADE_GLSL + _LINEAR_GLSL + """
+""" + _LINEAR_GLSL + """
 const float PI = 3.14159265;
 
 float D_ggx(float nh, float a) {
@@ -490,15 +346,13 @@ void main() {
     if (u_shading == 0) {
         vec3 albedo = to_linear(mix(vec3(0.62), base, u_orig));
         lin = studio(n, v, albedo, ao);
-        // grading sliders work in display space
-        lin = to_linear(grade(pow(lin, vec3(1.0 / 2.2))));
         lin += to_linear(u_rim_color) * fres * u_rim * 0.5;
     } else {
         vec3 mc = texture(u_matcap, n.xy * 0.495 + 0.5).rgb;
         float lum = dot(mc, vec3(0.299, 0.587, 0.114));
         vec3 col = mix(mc, base * lum * 1.6, u_orig) * 1.1 * ao * u_light;
         col += u_rim_color * fres * u_rim;
-        lin = to_linear(grade(col));
+        lin = to_linear(col);
     }
     // opaque: alpha 1 occludes trails + background; transparent: emission
     f_color = vec4(lin * u_alpha, u_alpha >= 0.999 ? 1.0 : 0.0);
@@ -556,7 +410,7 @@ in vec3  g_normal;
 in vec3  g_color;
 in float g_d;
 out vec4 f_color;
-""" + _MESH_GRADE_GLSL + _LINEAR_GLSL + """
+""" + _LINEAR_GLSL + """
 void main() {
     float cov = clamp(u_width * 0.5 + 0.5 - abs(g_d), 0.0, 1.0);
     if (cov <= 0.0) discard;
@@ -565,7 +419,7 @@ void main() {
     float front = n.z >= 0.0 ? 1.0 : 0.35;   // far side of the model dimmer
     vec3 col = g_color * (0.45 + 0.55 * facing) * front;
     col += u_rim_color * pow(1.0 - facing, 2.0) * u_rim * 0.5;
-    f_color = vec4(to_linear(grade(col)) * cov * u_wire_gain * u_emit * u_light, 0.0);
+    f_color = vec4(to_linear(col) * cov * u_wire_gain * u_emit * u_light, 0.0);
 }
 """
 
@@ -819,9 +673,7 @@ void main() {
 
 
 class GLRenderer:
-    FLOATS_PER_PARTICLE = 7   # x, y, z, r, g, b, size
-
-    def __init__(self, ctx: moderngl.Context, size: tuple, max_particles: int,
+    def __init__(self, ctx: moderngl.Context, size: tuple,
                  bg_color=(4, 4, 10), fade=0.10, bloom_intensity=1.4,
                  output_fbo=None):
         self.ctx = ctx
@@ -837,7 +689,6 @@ class GLRenderer:
         ctx.enable(moderngl.PROGRAM_POINT_SIZE)
 
         # ── Programs ──
-        self.point_prog = ctx.program(vertex_shader=POINT_VS, fragment_shader=POINT_FS)
         self.trail_prog = ctx.program(vertex_shader=FULLSCREEN_VS, fragment_shader=TRAIL_FS)
         self.down_prog = ctx.program(vertex_shader=FULLSCREEN_VS,
                                      fragment_shader=BLOOM_DOWN_FS)
@@ -847,37 +698,23 @@ class GLRenderer:
         self.overlay_prog = ctx.program(vertex_shader=OVERLAY_VS, fragment_shader=OVERLAY_FS)
         self.grid_prog = ctx.program(vertex_shader=GRID_VS, fragment_shader=GRID_FS)
         self.line_prog = ctx.program(vertex_shader=LINE_VS, fragment_shader=LINE_FS)
-        # T1: stateless GPU-physics program (fallback to the CPU path if it fails)
-        try:
-            self.gpu_prog = ctx.program(vertex_shader=GPU_POINT_VS,
-                                        fragment_shader=POINT_FS)
-        except Exception as e:
-            print(f"[warning] GPU particle shader failed ({e}); CPU fallback")
-            self.gpu_prog = None
-
-        # T19: 3D model surface / wireframe (GPU path only)
-        self.mesh_prog = self.wire_prog = None
-        if self.gpu_prog is not None:
-            try:
-                self.mesh_prog = ctx.program(vertex_shader=MESH_VS,
-                                             fragment_shader=SURFACE_FS)
-                self.wire_prog = ctx.program(vertex_shader=MESH_VS,
-                                             geometry_shader=WIRE_GS,
-                                             fragment_shader=WIRE_FS)
-            except Exception as e:
-                print(f"[warning] mesh shaders failed ({e}); models as points only")
-                self.mesh_prog = self.wire_prog = None
-        # programs that receive the model transform + scoped grading uniforms
-        self._model_progs = [p for p in (self.gpu_prog, self.mesh_prog,
-                                         self.wire_prog) if p is not None]
+        # 3D model: points (stateless GPU physics, T1), surface, wireframe (T19)
+        self.gpu_prog = ctx.program(vertex_shader=GPU_POINT_VS,
+                                    fragment_shader=POINT_FS)
+        self.mesh_prog = ctx.program(vertex_shader=MESH_VS,
+                                     fragment_shader=SURFACE_FS)
+        self.wire_prog = ctx.program(vertex_shader=MESH_VS,
+                                     geometry_shader=WIRE_GS,
+                                     fragment_shader=WIRE_FS)
+        # programs that receive the model transform + look uniforms
+        self._model_progs = [self.gpu_prog, self.mesh_prog, self.wire_prog]
         self._matcaps = []
-        if self.mesh_prog is not None:
-            for arr in matcaps.build_all():
-                tex = ctx.texture((arr.shape[1], arr.shape[0]), 3,
-                                  arr.tobytes(), dtype="f4")
-                tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
-                tex.repeat_x = tex.repeat_y = False
-                self._matcaps.append(tex)
+        for arr in matcaps.build_all():
+            tex = ctx.texture((arr.shape[1], arr.shape[0]), 3,
+                              arr.tobytes(), dtype="f4")
+            tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            tex.repeat_x = tex.repeat_y = False
+            self._matcaps.append(tex)
         self._model_tex = None       # texture of the current model
         self._mesh_objs = []         # GL buffers/VAOs of the current model
         self._mesh_vaos = None
@@ -888,12 +725,10 @@ class GLRenderer:
         # additive passes used to pile up over ~1/fade frames in the old
         # accumulation buffer; the trail layer keeps the max instead, so the
         # emission gain restores the brightness the presets were tuned for
-        for prog in (self.point_prog, self.gpu_prog, self.wire_prog):
-            if prog is not None and "u_emit" in prog._members:
+        for prog in (self.gpu_prog, self.wire_prog):
+            if "u_emit" in prog._members:
                 prog["u_emit"].value = EMISSION_GAIN
         self.set_post_params()  # initialize composite uniforms to neutral
-        self.set_scoped_colors()   # GL uniforms default to 0 → set neutral
-        self.set_scoped_fx()
         self.set_model_look()
 
         # ── Camera ──
@@ -902,21 +737,12 @@ class GLRenderer:
         self.cam_dist = (self.h / 2.0) / np.tan(self.fov / 2.0)
         self._proj = _perspective(self.fov, self.w / self.h, 10.0, 8000.0)
         self._view = _translate(0.0, 0.0, -self.cam_dist)
-        # base point-size scale: a particle at the model origin keeps its px size
-        self.point_prog["u_size_scale"].value = float(self.cam_dist)
         self.set_transform(0.0)
 
-        # ── Particle VBO / VAO ──
-        self._vbo = ctx.buffer(reserve=max_particles * self.FLOATS_PER_PARTICLE * 4)
-        # T1: lazily-sized static buffer for the GPU-physics path
+        # ── Point VBO / VAO (T1): lazily sized static buffer ──
         self._gpu_vbo = None
         self._gpu_vao = None
-        self._gpu_mode = 0
         self._gpu_count = 0
-        self._point_vao = ctx.vertex_array(
-            self.point_prog,
-            [(self._vbo, "3f 3f 1f", "in_pos", "in_color", "in_size")],
-        )
 
         # ── Framebuffers ──
         # The scene is drawn each frame into a multisampled HDR buffer (MSAA
@@ -1087,7 +913,6 @@ class GLRenderer:
         # GL expects column-major → transpose the row-major numpy matrix
         mvp_bytes = mvp.T.astype("f4").tobytes()
         model_bytes = model.T.astype("f4").tobytes()
-        self.point_prog["u_mvp"].write(mvp_bytes)
         for prog in self._model_progs:
             prog["u_mvp"].write(mvp_bytes)
             if "u_model" in prog._members:
@@ -1140,30 +965,6 @@ class GLRenderer:
         self.line_prog["u_mvp"].write(mvp.T.astype("f4").tobytes())
         self._axis_vao.render(mode=moderngl.LINES, vertices=2)
 
-    def set_scoped_colors(self, tint_fg=(1.0, 1.0, 1.0), tint_bg=(1.0, 1.0, 1.0),
-                          con_fg=1.0, con_bg=1.0, neg_fg=0.0, neg_bg=0.0):
-        """Per-scope color grading for the GPU path (subject vs background).
-        Pass neutral values for sliders that target the whole frame."""
-        vals = (("u_tint_fg", tuple(float(v) for v in tint_fg)),
-                ("u_tint_bg", tuple(float(v) for v in tint_bg)),
-                ("u_con_fg", float(con_fg)), ("u_con_bg", float(con_bg)),
-                ("u_neg_fg", float(neg_fg)), ("u_neg_bg", float(neg_bg)))
-        for prog in self._model_progs:
-            for name, val in vals:
-                if name in prog._members:
-                    prog[name].value = val
-
-    def set_scoped_fx(self, size_fg=1.0, size_bg=1.0, bright_fg=1.0,
-                      bright_bg=1.0, turb_fg=1.0, turb_bg=1.0):
-        """Routed Physique effects targeted at the subject / background only."""
-        vals = (("u_szm_fg", size_fg), ("u_szm_bg", size_bg),
-                ("u_brm_fg", bright_fg), ("u_brm_bg", bright_bg),
-                ("u_tbm_fg", turb_fg), ("u_tbm_bg", turb_bg))
-        for prog in self._model_progs:
-            for name, val in vals:
-                if name in prog._members:
-                    prog[name].value = float(val)
-
     def set_model_look(self, matcap=0, rim=1.0, rim_hue=0.52, orig=0.5,
                        transparent=False, shading=0, roughness=0.4, metal=0.0,
                        ao=1.0, wire_width=1.2, light=1.0):
@@ -1187,19 +988,18 @@ class GLRenderer:
         Point sizes are expressed in INTERNAL (supersampled) pixels."""
         self._size_mult = float(mult)
         s = self.cam_dist * max(self.dpr, self.render_scale)
-        self.point_prog["u_size_scale"].value = float(s * mult)
-        if self.gpu_prog is not None:
-            self.gpu_prog["u_size_scale"].value = float(s)
-            self.gpu_prog["u_size_mult"].value = float(mult)
+        self.gpu_prog["u_size_scale"].value = float(s)
+        self.gpu_prog["u_size_mult"].value = float(mult)
 
     # ------------------------------------------------------------------
     # T1: stateless GPU particle path
 
-    STATIC_FLOATS = 11    # pos3 + color3 + aux4 + fg1
+    STATIC_FLOATS = 10    # pos3 + color3 + aux4 (visuals/mesh.build_points)
 
-    def upload_particle_static(self, data: np.ndarray, mode: int, count: int):
-        """Upload the per-particle rest attributes ONCE (until the next rebuild)."""
-        if self.gpu_prog is None:
+    def upload_particle_static(self, data: np.ndarray, count: int):
+        """Upload the per-point rest attributes ONCE (until the next rebuild)."""
+        if count <= 0 or data is None:
+            self._gpu_count = 0
             return
         needed = count * self.STATIC_FLOATS * 4
         if self._gpu_vbo is None or self._gpu_vbo.size < needed:
@@ -1209,24 +1009,18 @@ class GLRenderer:
             self._gpu_vbo = self.ctx.buffer(reserve=needed)
             self._gpu_vao = self.ctx.vertex_array(
                 self.gpu_prog,
-                [(self._gpu_vbo, "3f 3f 4f 1f",
-                  "in_pos", "in_color", "in_aux", "in_fg")],
+                [(self._gpu_vbo, "3f 3f 4f", "in_pos", "in_color", "in_aux")],
             )
         self._gpu_vbo.write(np.ascontiguousarray(data[:count], dtype="f4").tobytes())
-        self._gpu_mode = int(mode)
         self._gpu_count = int(count)
 
     def draw_particles_gpu(self, uniforms: dict):
         """Draw the static buffer; all physics happens in the vertex shader."""
-        if self.gpu_prog is None or self._gpu_vao is None or self._gpu_count <= 0:
+        if self._gpu_vao is None or self._gpu_count <= 0:
             return
         prog = self.gpu_prog
-        prog["u_mode"].value = self._gpu_mode
         self._write_frame_uniforms(prog, uniforms, (
-            "u_time", "u_angle", "u_turb", "u_hide_bg", "u_bass",
-            "u_low_mid", "u_mid", "u_rms", "u_centroid",
-            "u_hz10", "u_hz11", "u_hz12", "u_depth", "u_edge", "u_inflate",
-            "u_mturb", "u_model_gain"))
+            "u_time", "u_inflate", "u_mturb", "u_model_gain"))
         self._points_target().use()
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = (moderngl.ONE, moderngl.ONE)   # additive
@@ -1254,7 +1048,7 @@ class GLRenderer:
         for obj in self._mesh_objs:
             obj.release()
         self._mesh_objs, self._mesh_vaos, self._mesh_counts = [], None, {}
-        if m is None or self.mesh_prog is None or len(m["tris"]) == 0:
+        if m is None or len(m["tris"]) == 0:
             return
         ctx = self.ctx
         vbo = ctx.buffer(np.ascontiguousarray(m["verts"], dtype="f4").tobytes())
@@ -1374,19 +1168,6 @@ class GLRenderer:
             return self._accum
         self._resolve()
         return self._scene_resolve
-
-    def draw_particles(self, data: np.ndarray, count: int):
-        """
-        data: float32 array shape (count, 6) → [x, y, r, g, b, size].
-        Drawn additively into the accumulation buffer.
-        """
-        if count <= 0:
-            return
-        self._points_target().use()
-        self.ctx.enable(moderngl.BLEND)
-        self.ctx.blend_func = (moderngl.ONE, moderngl.ONE)   # additive
-        self._vbo.write(data[:count].astype("f4").tobytes())
-        self._point_vao.render(mode=moderngl.POINTS, vertices=count)
 
     def end_frame(self):
         """Resolve MSAA, merge into the trails, bloom chain, composite."""

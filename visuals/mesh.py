@@ -303,8 +303,8 @@ def _sample_texture(tex, uv):
 
 
 def build_points(raw: RawModel, up: int, radius: float, n: int) -> np.ndarray:
-    """(N,11) static buffer for the GPU point shader (u_mode 3):
-    pos3, color3, aux4 = [normal3, band], fg = 1."""
+    """(N,10) static buffer for the GPU point shader:
+    pos3, color3, aux4 = [normal3, band]."""
     import trimesh
     meshes = [p for p in raw.parts if p.tm is not None]
     pos, nrm, col = [], [], []
@@ -339,19 +339,18 @@ def build_points(raw: RawModel, up: int, radius: float, n: int) -> np.ndarray:
     nrm = _orient(np.asarray(nrm, dtype=np.float32), up)
     nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-6
 
-    out = np.zeros((len(pos), 11), dtype=np.float32)
+    out = np.zeros((len(pos), 10), dtype=np.float32)
     out[:, 0:3] = pos
     out[:, 3:6] = np.clip(np.concatenate(col), 0.0, 1.0)
     out[:, 6:9] = nrm
     out[:, 9] = _bands(pos)
-    out[:, 10] = 1.0
     return out
 
 
 def point_gain(raw: RawModel, radius: float, n: int) -> float:
     """Brightness compensation for the additive point cloud: the same budget
     on a small surface piles up into white. ~1 at 1 point per px² of the
-    visible half of the surface (image mode's density)."""
+    visible half of the surface."""
     area = sum(p.area for p in raw.parts) * (radius / raw.radius) ** 2
     if area <= 0.0:
         return 1.0
