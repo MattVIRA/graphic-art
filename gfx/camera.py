@@ -135,16 +135,22 @@ class OrbitCamera:
         return right, np.cross(right, fwd), fwd
 
     def view_matrix(self, base_dist: float, extra_zoom: float = 1.0,
-                    shake=(0.0, 0.0)) -> np.ndarray:
+                    shake=(0.0, 0.0), amount: float = 1.0) -> np.ndarray:
         """base_dist : distance de la vue par défaut (cadrage du modèle) ;
         extra_zoom : slider Zoom du panneau ; shake : décalage écran (px) de
-        la « Secousse caméra »."""
-        z = max(self.zoom * extra_zoom, 0.05)
+        la « Secousse caméra » ; amount : part du geste de la souris prise en
+        compte (1 = la caméra, 0 = la vue de départ ; « Parallaxe » du fond,
+        T16) — les angles, la cible et le zoom sont mélangés, pas les
+        matrices, pour rester une vraie rotation."""
+        k = min(max(float(amount), 0.0), 1.0)
+        z = max(self.zoom ** k * extra_zoom, 0.05)
         dist = base_dist / z
-        self._dist_scale = 1.0 / z
-        _, _, fwd = self._basis(self.yaw, self.pitch)
-        eye = self.target - fwd * dist
-        V = look_at(eye, self.target)
+        if k == 1.0:
+            self._dist_scale = 1.0 / z
+        _, _, fwd = self._basis(self.yaw * k, self.pitch * k)
+        target = self.target * k
+        eye = target - fwd * dist
+        V = look_at(eye, target)
         V[0, 3] += shake[0]
         V[1, 3] += shake[1]
         return V

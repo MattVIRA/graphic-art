@@ -454,6 +454,8 @@ uniform vec2  u_texel;        // source texel size
 uniform int   u_prefilter;    // 1 on the first level
 uniform float u_threshold;
 uniform float u_knee;
+uniform sampler2D u_bgtex;    // fond SDF (T16), sous la scène
+uniform float u_bg_gain;      // 0 = pas de fond
 in vec2 v_uv;
 out vec4 f_color;
 vec3 S(float x, float y) { return texture(u_tex, v_uv + vec2(x, y) * u_texel).rgb; }
@@ -476,6 +478,10 @@ void main() {
                + (karis(a, b, d, e, w1) + karis(b, c, e, f, w2)
                 + karis(d, e, g, h, w3) + karis(e, f, h, i, w4)) * 0.125;
         col = s / (w0 * 0.5 + (w1 + w2 + w3 + w4) * 0.125);
+        if (u_bg_gain > 0.0) {   // le fond nourrit le bloom là où la scène est transparente
+            float a = clamp(texture(u_tex, v_uv).a, 0.0, 1.0);
+            col += texture(u_bgtex, v_uv).rgb * (1.0 - a) * u_bg_gain;
+        }
         // soft-knee threshold on the brightest channel
         float br = max(max(col.r, col.g), col.b);
         float rq = clamp(br - u_threshold + u_knee, 0.0, 2.0 * u_knee);
@@ -522,6 +528,11 @@ uniform sampler2D u_bloom;
 uniform float u_bloom_intensity;
 uniform float u_brightness;   // exposure (linear multiplier)
 uniform vec3  u_bg;           // background color (display space)
+uniform sampler2D u_bgtex;    // fond SDF (T16, HDR linéaire ; alpha = profondeur de visée)
+uniform float u_bg_on;        // 0 = pas de fond : rendu identique à avant T16
+uniform float u_bg_depth;     // 1 = même espace : une forme peut passer devant le modèle
+uniform sampler2D u_depth;    // profondeur de la scène (0–1)
+uniform vec2  u_near_far;
 uniform vec3  u_gain;         // per-channel RGB gain
 uniform float u_contrast;     // post contrast around 0.5
 uniform float u_invert;       // 0 = normal, 1 = negative
@@ -582,6 +593,22 @@ void main() {
         hdr = vec3(scene_at(v_uv + u_shift_r).r,
                    scene_at(v_uv + u_shift_g).g,
                    scene_at(v_uv + u_shift_b).b);
+    // fond SDF sous la scène : masqué par les surfaces opaques (alpha 1),
+    // visible sous les points additifs (alpha 0) et les trainées qui s'effacent
+    if (u_bg_on > 0.5) {
+        vec4 bg = texture(u_bgtex, v_uv);
+        vec3 under = hdr + bg.rgb * (1.0 - clamp(c.a, 0.0, 1.0));
+        float d = texture(u_depth, v_uv).r;
+        if (u_bg_depth > 0.5 && d < 1.0) {
+            // même espace : la forme plus proche que le modèle le cache
+            float n = u_near_far.x, f = u_near_far.y;
+            float zm = 2.0 * n * f / (f + n - (d * 2.0 - 1.0) * (f - n));
+            float front = clamp((zm - bg.a) / (zm * 0.01), 0.0, 1.0);
+            hdr = mix(under, bg.rgb, front);
+        } else {
+            hdr = under;
+        }
+    }
     hdr += texture(u_bloom, v_uv).rgb * u_bloom_intensity;
     vec3 col = agx(hdr * u_brightness);
     col += u_bg * (1.0 - clamp(c.a, 0.0, 1.0));
@@ -662,6 +689,13 @@ void main() {
 """
 
 
+NEAR, FAR = 10.0, 8000.0   # plans de la projection (px du monde)
+# lumière principale du Studio (SURFACE_FS), repère caméra : le fond peut
+# l'emprunter pour être éclairé comme le modèle (T16)
+KEY_LIGHT_DIR = np.array([-0.55, 0.65, 0.55]) / np.linalg.norm([-0.55, 0.65, 0.55])
+KEY_LIGHT_COLOR = np.array([3.2, 2.95, 2.7])
+
+
 class GLRenderer:
     def __init__(self, ctx: moderngl.Context, size: tuple,
                  bg_color=(4, 4, 10), fade=0.10, bloom_intensity=1.4,
@@ -677,6 +711,10 @@ class GLRenderer:
 
         self._screen = None
         ctx.enable(moderngl.PROGRAM_POINT_SIZE)
+        # fond SDF (T16) de la frame en cours : posé par set_background(),
+        # dessiné par end_frame() ; une texture 1×1 noire quand il est masqué
+        self._bg = None
+        self._bg_dummy = ctx.texture((1, 1), 4, dtype="f2")
 
         # ── Programs ──
         self.trail_prog = ctx.program(vertex_shader=FULLSCREEN_VS, fragment_shader=TRAIL_FS)
@@ -725,7 +763,7 @@ class GLRenderer:
         self.fov = np.radians(45.0)
         # distance so the model height (~h px) fills the vertical field of view
         self.cam_dist = (self.h / 2.0) / np.tan(self.fov / 2.0)
-        self._proj = _perspective(self.fov, self.w / self.h, 10.0, 8000.0)
+        self._proj = _perspective(self.fov, self.w / self.h, NEAR, FAR)
         self._view = _translate(0.0, 0.0, -self.cam_dist)
         self.set_transform(0.0)
 
@@ -820,17 +858,20 @@ class GLRenderer:
 
         # resolved scene (what the trail pass reads)
         self._scene_tex = tex((rw, rh))
-        self._scene_depth = ctx.depth_renderbuffer((rw, rh))
-        objs.append(self._scene_depth)
+        # profondeur de la scène, lisible par le fond SDF (T16 : même espace)
+        self._depth_tex = ctx.depth_texture((rw, rh))
+        self._depth_tex.compare_func = ""      # lue comme une valeur, pas une comparaison
+        self._depth_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        objs.append(self._depth_tex)
         if self.samples > 1:
             rb = ctx.renderbuffer((rw, rh), 4, samples=self.samples, dtype="f2")
             db = ctx.depth_renderbuffer((rw, rh), samples=self.samples)
             objs += [rb, db]
-            self._scene_resolve = fbo(self._scene_tex)
+            self._scene_resolve = fbo(self._scene_tex, self._depth_tex)
             self._accum = fbo(rb, db)            # draw target of the frame
         else:
             self._scene_resolve = None
-            self._accum = fbo(self._scene_tex, self._scene_depth)
+            self._accum = fbo(self._scene_tex, self._depth_tex)
 
         # persistent trail layer (ping-pong)
         self._trail_tex = [tex((rw, rh)), tex((rw, rh))]
@@ -874,7 +915,7 @@ class GLRenderer:
             return
         self.w, self.h = w, h
         self.cam_dist = (h / 2.0) / np.tan(self.fov / 2.0)
-        self._proj = _perspective(self.fov, w / h, 10.0, 8000.0)
+        self._proj = _perspective(self.fov, w / h, NEAR, FAR)
         self._view = _translate(0.0, 0.0, -self.cam_dist)
         self._screen = None
         self._build_internal()
@@ -1011,6 +1052,9 @@ class GLRenderer:
         self._write_frame_uniforms(prog, uniforms, (
             "u_time", "u_inflate", "u_mturb", "u_model_gain"))
         self._points_target().use()
+        # la cible résolue porte maintenant la profondeur (T16) : les points
+        # restent dessinés sans test, comme avant
+        self.ctx.disable(moderngl.DEPTH_TEST)
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = (moderngl.ONE, moderngl.ONE)   # additive
         self._gpu_vao.render(mode=moderngl.POINTS, vertices=self._gpu_count)
@@ -1158,12 +1202,58 @@ class GLRenderer:
         self._resolve()
         return self._scene_resolve
 
+    def set_background(self, bg_pass=None, frame=None, view=None, scale=0.5,
+                       unit=1.0):
+        """Fond SDF (T16) de cette frame : `bg_pass` (background.pass_),
+        `frame` (background.params.Frame), `view` = vue de la caméra du fond
+        (parallaxe), `scale` = résolution du fond / taille interne, `unit` =
+        px du monde par unité du fond. Sans argument : pas de fond."""
+        self._bg = None if bg_pass is None else (bg_pass, frame, view, scale, unit)
+
+    def _draw_background(self):
+        """Dessine le fond dans sa texture ; rend (texture, gain du bloom)."""
+        bg_pass, frame, view, scale, unit = self._bg
+        rw, rh = self._internal_size
+        size = (max(8, int(rw * scale)), max(8, int(rh * scale)))
+        view = np.asarray(view, dtype=np.float64)
+        inv_vp = np.linalg.inv(self._proj @ view)
+        # projection écran du centre du modèle (halo), avec la vraie caméra
+        c = self._proj @ self._view @ np.array([0.0, 0.0, 0.0, 1.0])
+        center = (c[0] / c[3] * 0.5 + 0.5, c[1] / c[3] * 0.5 + 0.5) if c[3] > 1e-6 \
+            else (0.5, 0.5)
+        camera = {
+            "u_inv_vp": tuple(inv_vp.T.flatten()),
+            "u_eye": tuple(np.linalg.inv(view)[:3, 3]),
+            "u_unit": float(unit),
+            "u_pix": float(2.0 * np.tan(self.fov / 2.0) / size[1]),
+            "u_center_uv": tuple(float(v) for v in center),
+            "u_aspect": float(self.w / self.h),
+            "u_scene_alpha": 4,
+            "u_scene_depth": 5,
+            "u_texel": (1.0 / size[0], 1.0 / size[1]),
+            "u_near_far": (NEAR, FAR),
+            "u_fwd": tuple(-view[2, :3]),
+            "u_same_space": 1.0 if frame.same_space else 0.0,
+        }
+        if frame.light_model:
+            # même lumière que le modèle : la lumière principale du Studio,
+            # attachée à la caméra, ramenée dans le monde
+            camera["u_sun_dir"] = tuple(view[:3, :3].T @ KEY_LIGHT_DIR)
+            camera["u_sun_col"] = tuple(KEY_LIGHT_COLOR / np.pi * frame.light_int)
+        self._scene_tex.use(4)   # couverture du modèle (espaces séparés)
+        self._depth_tex.use(5)   # profondeur du modèle (même espace)
+        return bg_pass.render(frame, size, camera), frame
+
     def end_frame(self):
         """Resolve MSAA, merge into the trails, bloom chain, composite."""
         ctx = self.ctx
         ctx.disable(moderngl.BLEND)
         ctx.disable(moderngl.DEPTH_TEST)
         self._resolve()
+        bg_tex, bg_frame = (self._draw_background() if self._bg is not None
+                            else (self._bg_dummy, None))
+        bg_bloom = bg_frame.bloom if bg_frame is not None else 0.0
+        self._bg = None
 
         # trails: trail' = merge(trail × decay, scene)
         src, dst = self._trail_idx, 1 - self._trail_idx
@@ -1182,6 +1272,9 @@ class GLRenderer:
         dp["u_tex"].value = 0
         dp["u_threshold"].value = float(self.bloom_threshold)
         dp["u_knee"].value = float(max(self.bloom_threshold * 0.5, 0.05))
+        dp["u_bgtex"].value = 2
+        dp["u_bg_gain"].value = float(bg_bloom)
+        bg_tex.use(2)
         src_tex = trail
         for i, (t, f) in enumerate(self._bloom_down):
             f.use()
@@ -1213,6 +1306,13 @@ class GLRenderer:
         cp["u_scene"].value, cp["u_bloom"].value = 0, 1
         cp["u_bloom_intensity"].value = self.bloom_intensity
         cp["u_bg"].value = self.bg
+        cp["u_bgtex"].value = 2
+        cp["u_bg_on"].value = 0.0 if bg_tex is self._bg_dummy else 1.0
+        cp["u_bg_depth"].value = 1.0 if bg_frame is not None and bg_frame.same_space else 0.0
+        cp["u_depth"].value = 5
+        cp["u_near_far"].value = (NEAR, FAR)
+        bg_tex.use(2)
+        self._depth_tex.use(5)
         cp["u_vignette"].value = float(self.vignette)
         ow, oh = target.viewport[2], target.viewport[3]
         cp["u_out_texel"].value = (1.0 / max(ow, 1), 1.0 / max(oh, 1))

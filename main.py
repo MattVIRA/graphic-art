@@ -35,6 +35,7 @@ import pygame
 
 from app import frame
 from app import log as applog
+from app.decor import Decor
 from app.errors import FrameGuard, UserError
 from app.hud import Hud
 from app.input import MouseGestures
@@ -97,6 +98,7 @@ class App:
         self.hud = Hud(WIDTH, self.renderer.dpr)
         self.notice = None            # (message, fin d'affichage) : erreur au HUD
         self.panel = ControlPanel()   # second window with live sliders
+        self.decor = Decor(ctx, self.report)   # T16 : fond en formes SDF
         self.panel_alive = True
         self.sources = SourceManager(on_title=self.window.set_title,
                                      report=self.report)
@@ -261,8 +263,13 @@ class App:
         if p["axis_spin"] >= 0.5:
             self.axis_precession += p["axis_spin_speed"] * frame.DEG * dt
         self.camera.update(dt)   # before set_transform (view matrix)
-        renderer.set_view(self.camera.view_matrix(renderer.cam_dist, p["zoom"],
-                                                  frame.shake(fx, t)))
+        shake = frame.shake(fx, t)
+        renderer.set_view(self.camera.view_matrix(renderer.cam_dist, p["zoom"], shake))
+        # T16 : le fond suit la caméra selon « Parallaxe »
+        bg_view = self.camera.view_matrix(renderer.cam_dist, p["zoom"], shake,
+                                          amount=p["bg_comp_parallax"])
+        self.decor.frame(renderer, p, features, routed.bands, dt, bg_view,
+                         self.model.model_radius, t)
         frame.draw(renderer, p, fx, rp, self.axis_precession)
         self._draw_hud(features)
 
@@ -310,6 +317,7 @@ class App:
             "bpm": float(f.get("bpm", 0.0) or self.sources.tempo),
             "fps": self.clock.fps,
             "source": self.sources.label,
+            "bg_ms": self.decor.gpu_ms,
         })
 
     def _draw_hud(self, features: dict):

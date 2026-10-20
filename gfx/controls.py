@@ -24,7 +24,9 @@ import multiprocessing as mp
 import queue
 import random
 import time
+from types import SimpleNamespace
 
+from background import schema as bg_schema
 from gfx import presets as store
 from gfx.matcaps import NAMES as MATCAP_NAMES
 from visuals.mesh import UP_AXES as MESH_UP_AXES
@@ -111,6 +113,7 @@ EFFECTS = [
 ]
 
 DEFAULTS["dynamics"] = 0.0   # 0 = off, 1 = effets très calmes dans les breaks
+DEFAULTS.update(bg_schema.defaults())   # T16 : onglet Fond (show_grid y déménage)
 
 for _i in range(len(EQ_BANDS)):
     DEFAULTS[f"band{_i}_fx"] = 0.0    # effect index in EFFECTS (0 = Aucun)
@@ -331,6 +334,8 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
                notice: str = None):
     import tkinter as tk
     from tkinter import filedialog, ttk
+
+    from gfx import bg_panel  # tkinter : seulement dans le process du panneau
 
     root = tk.Tk()
     root.title("Graphic Art — Contrôles")
@@ -790,7 +795,6 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
                 .pack(fill="x", padx=8, pady=(4, 0))
         ttk.Frame(grp).pack(pady=2)   # bottom breathing room
 
-    add_check(tab_video, "Grille du décor", "show_grid", pady=(8, 10))
     claim_keys("Vidéo")
     tab_presets_ui(tab_video, "Vidéo", {}, pady=(4, 12))
 
@@ -843,6 +847,16 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
     ttk.Frame(grp_model).pack(pady=2)
 
     claim_keys("Objet")
+
+    # ── Onglet Fond (T16 : formes SDF, généré depuis background/schema) ──
+    tab_bg = make_tab("Fond")
+    reset_button(tab_bg, "Fond")
+    bg_panel.build(tab_bg, SimpleNamespace(
+        slider=build_slider, combo=add_combo, check=add_check,
+        apply=apply_values, scales=scales, checks=checks, combos=combos,
+        status=flash_status, tooltip=Tooltip))
+    claim_keys("Fond")
+    tab_presets_ui(tab_bg, "Fond", bg_schema.AMBIANCES, pady=(12, 12))
 
     # ── Onglet Rotation ───────────────────────────────────────────────
     tab_rot = make_tab("Rotation")
@@ -954,7 +968,8 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
                 status_lbl.configure(fg=MUTED, text=(
                     f"{'BPM %.0f' % bpm if bpm > 0 else 'BPM --'} · "
                     f"RMS {blocks} · {pkt.get('fps', 0.0):.0f} fps · "
-                    f"{pkt.get('source', '—')}"))
+                    f"{pkt.get('source', '—')}"
+                    + (f" · fond {pkt['bg_ms']:.1f} ms" if pkt.get("bg_ms") else "")))
         root.after(66, poll_monitor)   # ~15 Hz
 
     poll_monitor()

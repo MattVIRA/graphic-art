@@ -6,6 +6,9 @@ comparer la qualité d'image avant / après une modification du renderer.
     python tools/snapshot.py --visual primitive:torus --tag avant
     python tools/snapshot.py --visual inputs/3D_models/x/scene.gltf
     python tools/snapshot.py --orbit 40,25 --grid   # caméra orbitale (T26)
+    python tools/snapshot.py --bg-recipe Hélices    # fond SDF (T16) : une recette
+    python tools/snapshot.py --seed 42 --style surface   # chaîne tirée au dé
+    python tools/snapshot.py --bg-recipe Essaim --bg-set bg_comp_void=3   # + un réglage
 
 Sortie : captures/bench/<tag>/<scène>.png (+ temps GPU moyen par frame).
 Les features audio sont synthétiques et déterministes (silence / fort) ;
@@ -23,6 +26,8 @@ from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.decor import Decor  # noqa: E402
+from background import schema as bg_schema  # noqa: E402
 from gfx.camera import OrbitCamera  # noqa: E402
 from gfx.controls import DEFAULTS  # noqa: E402
 from gfx.renderer import GLRenderer  # noqa: E402
@@ -30,6 +35,7 @@ from visuals import mesh as meshlib  # noqa: E402
 from visuals.model_source import ModelSource  # noqa: E402
 
 W, H = 1280, 720
+STYLES = ("points", "surface", "wire")
 N_MELS = 64
 
 
@@ -50,7 +56,7 @@ def features(level: float, t: float) -> dict:
 
 
 def render_scene(ctx, renderer, particles, p, level, camera, grid=False,
-                 frames=45):
+                 frames=45, decor=None):
     """Render `frames` frames (trails settle) and return the last one + ms/frame."""
     times = []
     for i in range(frames):
@@ -66,6 +72,12 @@ def render_scene(ctx, renderer, particles, p, level, camera, grid=False,
         renderer.bloom_threshold = p["bloom_threshold"]
         renderer.vignette = p["vignette"]
         renderer.set_view(camera.view_matrix(renderer.cam_dist, p["zoom"]))
+        if decor is not None:   # T16 : mêmes sources que le routing (BEAT, KICK…)
+            bands = list(f["eq_bands"]) + [f["bass"], f["bass"], 0.0, level]
+            decor.frame(renderer, p, f, bands, 1.0 / 60.0,
+                        camera.view_matrix(renderer.cam_dist, p["zoom"],
+                                           amount=p["bg_comp_parallax"]),
+                        particles.model_radius, t)
         deg = np.pi / 180.0
         renderer.set_transform(0.6 + t * 0.4, rp["scale"],
                                axis_tilt=p["axis_tilt"] * deg,
@@ -99,6 +111,16 @@ def main():
     ap.add_argument("--orbit", default=None, metavar="LACET,TANGAGE",
                     help="position de la caméra orbitale en degrés (T26)")
     ap.add_argument("--grid", action="store_true", help="dessiner la grille")
+    ap.add_argument("--bg-recipe", default=None, metavar="NOM",
+                    help="fond SDF (T16) : une recette intégrée ("
+                         + ", ".join(bg_schema.AMBIANCES) + ")")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="fond SDF : chaîne tirée au dé (après la recette s'il y en a une)")
+    ap.add_argument("--bg-quality", type=int, default=1, help="0 Bas, 1 Moyen, 2 Haut")
+    ap.add_argument("--bg-set", action="append", default=[], metavar="CLÉ=VALEUR",
+                    help="un réglage du fond (répétable), ex. bg_comp_void=1.2")
+    ap.add_argument("--style", action="append", choices=STYLES, default=None,
+                    help="styles rendus (répétable) ; défaut : les trois")
     args = ap.parse_args()
 
     camera = OrbitCamera()
@@ -121,6 +143,21 @@ def main():
     renderer.set_render_scale(args.scale or DEFAULTS["render_scale"])
 
     p = dict(DEFAULTS)
+    decor = None
+    if args.bg_recipe is not None or args.seed is not None or args.bg_set:
+        if args.bg_recipe is not None:
+            names = {n.lower(): n for n in bg_schema.AMBIANCES}
+            name = names.get(args.bg_recipe.lower())
+            if name is None:
+                ap.error(f"recette inconnue : {args.bg_recipe}")
+            p.update(bg_schema.AMBIANCES[name])
+        if args.seed is not None:
+            p.update(bg_schema.random_values(args.seed))
+        p.update(bg_visible=1.0, bg_quality=float(args.bg_quality))
+        for item in args.bg_set:
+            key, value = item.split("=")
+            p[key] = float(value)
+        decor = Decor(ctx, report=lambda msg, exc=None: print(msg, exc or ""))
     for vis in args.visual or ["primitive:torus"]:
         particles = ModelSource(W, H)
         name = os.path.splitext(os.path.basename(vis.replace("primitive:", "")))[0]
@@ -128,16 +165,17 @@ def main():
                                             particles.max_points), 0)
         renderer.upload_particle_static(*particles.build_static())
         renderer.upload_mesh(particles.model_mesh)
-        for style in (0, 1, 2):
+        for style in [STYLES.index(s) for s in args.style or STYLES]:
             for level, lname in ((0.0, "silence"), (1.0, "fort")):
                 p["model_style"] = float(style)
                 renderer.fade = p["trail"]
                 img, ms = render_scene(ctx, renderer, particles, p, level,
-                                       camera, args.grid)
-                sname = ["points", "surface", "wire"][style]
+                                       camera, args.grid, decor=decor)
+                sname = STYLES[style]
                 path = os.path.join(out_dir, f"{name}_{sname}_{lname}.png")
                 img.save(path)
-                print(f"  {path}  ({ms:.2f} ms/frame)")
+                bg = f", fond {decor.gpu_ms:.2f} ms" if decor and decor.gpu_ms else ""
+                print(f"  {path}  ({ms:.2f} ms/frame{bg})")
 
 
 if __name__ == "__main__":
