@@ -58,6 +58,8 @@ class Decor:
             renderer.set_background()
             self.state.values = None
             self.res_index = None
+            if self.gl is not None:
+                self.gl.forget()
             return None
         f = self.state.step(p, features, bands, dt, model_hue=p.get("rim_hue", 0.0))
         renderer.bg = f.solid

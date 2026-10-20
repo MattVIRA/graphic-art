@@ -10,7 +10,7 @@ import pytest
 
 from background import macros, noise, palettes, params, quality, schema
 from background.params import BackgroundState, travel_dir
-from background.pass_ import SHADER_DIR, SHADER_FILES, fragment_source
+from background.pass_ import RESOLVE_FILE, SHADER_DIR, SHADER_FILES, fragment_source
 from gfx.camera import OrbitCamera, look_at
 
 QUIET = {"rms": 0.0, "bpm": 0.0, "beat_phase": 0.0}
@@ -58,8 +58,9 @@ def test_fragment_source_has_defines_and_declarations():
 
 
 def test_shader_files_are_the_chain():
-    """Un seul shader de forme : la chaîne ; les 4 scènes de la passe 1 sont parties."""
-    assert sorted(os.listdir(SHADER_DIR)) == sorted(SHADER_FILES)
+    """Un seul shader de forme : la chaîne ; les 4 scènes de la passe 1 sont
+    parties (+ la passe de résolution, passe 5)."""
+    assert sorted(os.listdir(SHADER_DIR)) == sorted(SHADER_FILES + [RESOLVE_FILE])
     assert "geometric.glsl" not in SHADER_FILES
 
 
@@ -149,7 +150,8 @@ def test_same_seed_same_chain_modes_included():
         assert a[key] == b[key]
 
 
-@pytest.mark.parametrize("key", ["bg_sp_mode", "bg_fu_combo", "bg_dx_axis"])
+@pytest.mark.parametrize("key", ["bg_sp_mode", "bg_fu_combo", "bg_dx_axis",
+                                 "bg_nw_gen", "bg_nw_mode"])
 def test_mode_weights_are_respected(key):
     p = schema.BY_KEY[key]
     n = 1000
@@ -227,6 +229,7 @@ def test_first_frame_is_not_slewed():
     assert st.values["bg_sp_period"] == 12.0
 
 
+@pytest.mark.slow
 def test_motion_stays_bounded_over_a_long_session():
     st = BackgroundState()
     p = settings(bg_mov_speed=4.0, bg_mov_rot=1.0, bg_col_cycle=1.0)
@@ -395,6 +398,58 @@ def test_satellites_orbit_and_stay_unit():
     assert not np.allclose(a[:5], b[:5])
 
 
+# ── monde de bruit (passe 4) ──────────────────────────────────────────
+def test_world_recipes_cover_every_world():
+    worlds = {vals.get("bg_nw_mode", 0.0) for vals in schema.AMBIANCES.values()
+              if vals.get("bg_nw_gen") == 1.0}
+    assert worlds == set(map(float, range(len(schema.WORLD_MODES))))
+    # les recettes de formes restent en formes répétées (défaut)
+    assert schema.BY_KEY["bg_nw_gen"].default == 0.0
+
+
+def test_cave_threshold_leaves_the_asked_share_of_rock():
+    values = (noise.texture()[..., 0].astype(float) - 0.5) * 2.0
+    for fill in (0.3, 0.5, 0.7):
+        thr = noise.centered_quantile(1.0 - fill)
+        assert (values > thr).mean() == pytest.approx(fill, abs=0.01)
+    assert noise.centered_quantile(0.2) < noise.centered_quantile(0.8)
+
+
+def test_world_slope_bounds_the_noise():
+    gn = noise.max_gradient_norm()
+    assert 0.0 < gn < 0.5
+    c = params.world_constants(macros.apply(schema.defaults()))
+    assert c["u_nw_G"] == pytest.approx(16.0 * gn)
+    calm = params.world_constants(dict(macros.apply(schema.defaults()), bg_nw_warp=0.0))
+    assert calm["u_nw_warpL"] == 0.0 < c["u_nw_warpL"]
+
+
+def test_world_layers_flow_and_freeze():
+    p = settings(bg_nw_gen=1.0, bg_nw_flow=0.5)
+    st = BackgroundState()
+    a = np.asarray(run(st, p).uniforms["u_nw_flow2"])
+    b = np.asarray(run(st, p, dt=1.0, steps=4).uniforms["u_nw_flow2"])
+    assert np.linalg.norm(b - a) == pytest.approx(0.5 * params.FLOW_SPEEDS[1] * 4.0, rel=1e-6)
+    frozen = np.asarray(run(st, dict(p, bg_mov_freeze=1.0), steps=10).uniforms["u_nw_flow2"])
+    assert np.allclose(frozen, b)
+    # les trois couches ne glissent pas dans la même direction
+    d = [v / np.linalg.norm(v) for v in params.FLOW_DIRS]
+    assert abs(d[0] @ d[1]) < 0.9 and abs(d[1] @ d[2]) < 0.9
+
+
+def test_landscape_travels_horizontally():
+    climbing = dict(schema.defaults(), bg_mov_dir_el=40.0, bg_nw_gen=1.0, bg_nw_mode=2.0)
+    assert travel_dir(climbing)[1] == 0.0
+    cave = dict(climbing, bg_nw_mode=0.0)
+    assert travel_dir(cave)[1] > 0.5
+
+
+def test_world_detail_follows_the_world_size():
+    small = run(BackgroundState(), settings(bg_nw_gen=1.0, bg_nw_scale=8.0))
+    big = run(BackgroundState(), settings(bg_nw_gen=1.0, bg_nw_scale=40.0))
+    assert big.uniforms["u_detail"] > small.uniforms["u_detail"]
+
+
 # ── bruit 3D ──────────────────────────────────────────────────────────
 def test_noise_texture_is_deterministic_bounded_and_periodic():
     tex = noise.texture()
@@ -509,3 +564,38 @@ def test_parallax_amount_blends_the_camera():
     assert np.allclose(fixed, look_at((0.0, 0.0, 800.0 / 1.2), (0.0, 0.0, 0.0)))
     half = cam.view_matrix(800.0, 1.2, amount=0.5)
     assert np.allclose(half[:3, :3] @ half[:3, :3].T, np.eye(3))   # rotation pure
+
+
+def _sway(state, p, secs, fps=15):
+    """Écart d'un point fixe devant la caméra (10 unités) à sa trajectoire
+    rectiligne dans l'espace des formes, sur les 4 dernières secondes."""
+    pts = []
+    for i in range(int(secs * fps)):
+        ph = (i / fps * 2.0) % 1.0
+        f = state.step(p, {"rms": 0.6, "bpm": 120.0, "beat_phase": ph}, [0.0] * 11, 1 / fps)
+        u = f.uniforms
+        rot = np.asarray(u["u_rot"]).reshape(3, 3).T
+        pts.append((rot @ np.array([0.0, 0.0, -10.0]) + np.asarray(u["u_offset"])) / u["u_scale"])
+    pts = np.array(pts[-4 * fps:])
+    t = np.arange(len(pts))[:, None]
+    a = np.hstack([t, np.ones_like(t)])
+    coef, *_ = np.linalg.lstsq(a, pts, rcond=None)
+    return float(np.abs(pts - a @ coef).max())
+
+
+@pytest.mark.slow
+def test_breath_is_centred_on_the_object():
+    """La respiration fait grandir le décor autour de l'objet : l'objet
+    reste sur son trajet, et l'aller-retour ne grandit pas avec le chemin
+    parcouru (avant : ±6 unités au tempo après 5 min)."""
+    p = settings(bg_mov_breath=0.03, bg_mov_breath_beats=1.0, bg_mov_drift=0.0,
+                 bg_mov_travel=2.0)
+    state = BackgroundState()
+    gaps = []
+    for _ in range(60):          # l'objet (p = 0) reste à la même place de son trajet
+        u = run(state, p, features=LOUD).uniforms
+        gaps.append(np.asarray(u["u_offset"]) / u["u_scale"] - np.asarray(u["u_path_o"]))
+    assert np.ptp(np.array(gaps), axis=0).max() < 1e-9
+    early = _sway(BackgroundState(), p, 20)
+    late = _sway(BackgroundState(), p, 200)
+    assert late < 0.5 and late < early * 1.5 + 0.05

@@ -3,7 +3,10 @@ compilés au démarrage (pas de binaires de programme fiables sur macOS :
 compiler en cours de route ferait une saccade). La chaîne d'étages choisit
 ses opérations par uniforms : changer de mode ne recompile rien. Plus une
 texture HDR à la résolution du fond, une palette 1D, la texture 3D de
-bruit du warp et la mesure du temps GPU.
+bruit du warp et la mesure du temps GPU. Passe 5 : le rayon est décalé
+d'une fraction de pixel à chaque frame, puis `resolve.glsl` mélange la
+frame à l'historique reprojeté (ping-pong à la résolution interne) et
+l'agrandit en suivant les contours (`background/temporal.py`).
 
 Les sources GLSL peuvent être modifiées pendant que l'appli tourne :
 `reload_if_changed()` recompile, et garde les anciens programmes si la
@@ -17,13 +20,15 @@ import time
 import moderngl
 import numpy as np
 
-from background import noise, palettes, quality, schema
+from background import noise, palettes, quality, schema, temporal
 
 log = logging.getLogger(__name__)
 
 SHADER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shaders")
 SHADER_FILES = ["common.glsl", "chain.glsl", "main.glsl"]   # dans cet ordre
+RESOLVE_FILE = "resolve.glsl"            # passe 5 : accumulation + agrandissement
 PALETTE_UNIT, NOISE_UNIT = 3, 6          # 4 et 5 : scène et profondeur (renderer)
+CUR_UNIT, HIST_UNIT, HIST_AUX_UNIT = 7, 8, 9
 
 FULLSCREEN_VS = """
 #version 330
@@ -48,6 +53,10 @@ def fragment_source(level: int) -> str:
             + "".join(_read(name) for name in SHADER_FILES))
 
 
+def resolve_source() -> str:
+    return "#version 330\n" + _read(RESOLVE_FILE)
+
+
 class BackgroundPass:
     def __init__(self, ctx: moderngl.Context):
         self.ctx = ctx
@@ -63,6 +72,11 @@ class BackgroundPass:
         self.noise_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
         self.noise_tex.repeat_x = self.noise_tex.repeat_y = self.noise_tex.repeat_z = True
         self.tex = self.fbo = None
+        # passe 5 : historique ping-pong à la résolution interne (couleur +
+        # part devant le modèle ; poids + profondeur)
+        self.history = temporal.History()
+        self._hist = []
+        self._hist_i = 0
         self._queries = [ctx.query(time=True), ctx.query(time=True)]
         self._pending = [False, False]
         self._qi = 0
@@ -72,14 +86,19 @@ class BackgroundPass:
     # ── programmes ────────────────────────────────────────────────────
     @staticmethod
     def _mtimes() -> tuple:
-        return tuple(os.path.getmtime(os.path.join(SHADER_DIR, n)) for n in SHADER_FILES)
+        return tuple(os.path.getmtime(os.path.join(SHADER_DIR, n))
+                     for n in SHADER_FILES + [RESOLVE_FILE])
 
     def _compile_all(self) -> dict:
+        """Programmes de marche par niveau, plus celui de la résolution
+        (clé "resolve")."""
         t0 = time.perf_counter()
         progs = {}
         for lv in range(len(quality.LEVELS)):
             progs[lv] = self.ctx.program(vertex_shader=FULLSCREEN_VS,
                                          fragment_shader=fragment_source(lv))
+        progs["resolve"] = self.ctx.program(vertex_shader=FULLSCREEN_VS,
+                                            fragment_shader=resolve_source())
         log.info("fond : %d programmes compilés en %.0f ms", len(progs),
                  (time.perf_counter() - t0) * 1000.0)
         return progs
@@ -96,6 +115,7 @@ class BackgroundPass:
             self._vao(prog).render(moderngl.TRIANGLES, vertices=3)
         fbo.release()
         tex.release()
+        self.history.forget()
 
     def _bind_textures(self):
         self.palette_tex.use(PALETTE_UNIT)
@@ -103,7 +123,9 @@ class BackgroundPass:
 
     @staticmethod
     def _set_samplers(prog):
-        for name, unit in (("u_palette", PALETTE_UNIT), ("u_noise", NOISE_UNIT)):
+        for name, unit in (("u_palette", PALETTE_UNIT), ("u_noise", NOISE_UNIT),
+                           ("u_cur", CUR_UNIT), ("u_hist", HIST_UNIT),
+                           ("u_hist_aux", HIST_AUX_UNIT), ("u_model_depth", 5)):
             if name in prog._members:
                 prog[name].value = unit
 
@@ -118,6 +140,7 @@ class BackgroundPass:
         for prog in self.programs.values():
             prog.release()
         self.programs, self._vaos = progs, {}
+        self.history.forget()
         return True
 
     def _vao(self, prog):
@@ -138,22 +161,66 @@ class BackgroundPass:
             self.fbo = self.ctx.framebuffer(color_attachments=[self.tex])
         return self.fbo
 
-    def render(self, frame, size, camera: dict):
-        """Dessine le fond dans sa texture (rendue) ; camera : u_inv_vp,
-        u_eye, u_unit, u_pix, u_center_uv, u_aspect."""
-        prog = self.programs[quality.level(frame.quality)]
-        if frame.palette_rev != self._palette_rev and frame.palette is not None:
-            self.palette_tex.write(np.ascontiguousarray(frame.palette, dtype="f4").tobytes())
-            self._palette_rev = frame.palette_rev
+    def _history_targets(self, size):
+        """Deux jeux (couleur RGBA, poids + profondeur RG) à la taille de
+        sortie ; recréés (et vidés : poids 0) quand la taille change."""
+        if self._hist and self._hist[0][0].size == size:
+            return
+        for col, aux, fbo in self._hist:
+            fbo.release()
+            col.release()
+            aux.release()
+        self._hist = []
+        for _ in range(2):
+            col = self.ctx.texture(size, 4, dtype="f2")
+            col.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            col.repeat_x = col.repeat_y = False
+            aux = self.ctx.texture(size, 2, dtype="f2")
+            aux.filter = (moderngl.NEAREST, moderngl.NEAREST)
+            fbo = self.ctx.framebuffer(color_attachments=[col, aux])
+            fbo.use()
+            self.ctx.clear(0.0, 0.0, 0.0, 0.0)
+            self._hist.append((col, aux, fbo))
+        self.history.forget()
+
+    @staticmethod
+    def _write(prog, uniforms: dict):
         members = prog._members
-        for name, value in list(frame.uniforms.items()) + list(camera.items()):
+        for name, value in uniforms.items():
             if name not in members:
                 continue   # éliminé par le compilateur
             if isinstance(value, np.ndarray):   # tableaux d'uniforms
                 prog[name].write(np.ascontiguousarray(value, dtype="f4").tobytes())
             else:
                 prog[name].value = value
-        if "u_zero" in members:
+
+    def render(self, frame, size, camera: dict, proj, view, unit: float, out_size):
+        """Dessine le fond (taille `size`) puis le résout vers `out_size`
+        (la taille de rendu ; l'historique en prend au plus 1,5 × `size`) ;
+        rend la texture résolue (rgb = fond, a = part devant le modèle).
+        camera : u_inv_vp, u_eye, u_unit, u_pix, u_center_uv, u_aspect… ;
+        proj, view : la même caméra (matrices 4×4), pour la reprojection.
+        Profondeur du modèle sur l'unité 5 (renderer)."""
+        u = frame.uniforms
+        pose = temporal.Pose(
+            vp=proj @ view, eye=np.linalg.inv(view)[:3, 3], fwd=-view[2, :3],
+            unit=float(unit), far=float(u["u_comp_far"]),
+            rot=np.asarray(u["u_rot"], dtype=np.float64).reshape(3, 3).T,
+            offset=np.asarray(u["u_offset"], dtype=np.float64),
+            scale=float(u["u_scale"]))
+        out_size = temporal.history_size(size, out_size)
+        self._history_targets(out_size)
+        prev, n = self.history.step((size, frame.quality, frame.same_space,
+                                     frame.structure), pose)
+        wmax = float(frame.history)
+        jit = temporal.jitter(n) if wmax > 0.0 else (0.0, 0.0)
+
+        prog = self.programs[quality.level(frame.quality)]
+        if frame.palette_rev != self._palette_rev and frame.palette is not None:
+            self.palette_tex.write(np.ascontiguousarray(frame.palette, dtype="f4").tobytes())
+            self._palette_rev = frame.palette_rev
+        self._write(prog, dict(frame.uniforms, **camera, u_jitter=jit))
+        if "u_zero" in prog._members:
             prog["u_zero"].value = 0
         self._set_samplers(prog)
         self._bind_textures()
@@ -168,4 +235,27 @@ class BackgroundPass:
             self.gpu_ms = self._queries[other].elapsed / 1e6
             self._pending[other] = False
         self._qi = other
-        return self.tex
+
+        # résolution : accumulation temporelle + agrandissement
+        src_col, src_aux, _ = self._hist[self._hist_i]
+        dst_col, _, dst_fbo = self._hist[1 - self._hist_i]
+        rp = self.programs["resolve"]
+        self._write(rp, dict(temporal.resolve_uniforms(pose, prev),
+                             u_near_far=camera["u_near_far"],
+                             u_cur_size=tuple(float(v) for v in size),
+                             u_out_size=tuple(float(v) for v in out_size),
+                             u_jitter=jit, u_wmax=wmax,
+                             u_reset=1.0 if prev is None else 0.0,
+                             u_same_space=camera["u_same_space"]))
+        self._set_samplers(rp)
+        self.tex.use(CUR_UNIT)
+        src_col.use(HIST_UNIT)
+        src_aux.use(HIST_AUX_UNIT)
+        dst_fbo.use()
+        self._vao(rp).render(moderngl.TRIANGLES, vertices=3)
+        self._hist_i = 1 - self._hist_i
+        return dst_col
+
+    def forget(self):
+        """Fond masqué : l'historique repartira de zéro."""
+        self.history.forget()

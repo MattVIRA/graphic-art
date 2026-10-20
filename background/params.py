@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from background import macros, noise, palettes
+from background import macros, noise, palettes, temporal
 from background.schema import BREATH_BEATS, MAX_SATELLITES, PARAMS, RESOLUTIONS
 
 # ordre des sources dans `Routed.bands` (app/routing.py) : 7 bandes EQ,
@@ -32,6 +32,11 @@ FREE_BPM = 120.0          # horloge des beats sans tempo
 DRIFT_AMP = 0.3           # amplitude de la dérive (unités du fond)
 GROUND = 2                # mode d'Espace « Grille au sol » (voyage à l'horizontale)
 KIFS = 5                  # mode d'Espace « Pliage KIFS »
+PAYSAGE = 2               # monde « Paysage » (voyage à l'horizontale)
+# directions des trois couches du monde de bruit (flux) : chacune glisse
+# dans sa direction, à sa vitesse — rien ne se répète
+FLOW_DIRS = (np.array([0.3, 0.15, 1.0]), np.array([-0.8, 0.4, 0.5]), np.array([0.2, 0.9, -0.4]))
+FLOW_SPEEDS = (0.5, 1.0, 1.7)
 KIFS_AXIS = np.array([1.0, 1.6, 0.7]) / np.linalg.norm([1.0, 1.6, 0.7])
 KIFS_SIZE = 2.0           # taille des formes dans l'espace plié (× Taille)
 SINGLE = 0                # mode d'Espace « Objet seul »
@@ -45,6 +50,9 @@ NOISE_GRAD = None         # plus forte pente du bruit 3D, calculée au premier u
 AUDIO_PARAMS = [p for p in PARAMS if p.audio is not None]
 SLEW_PARAMS = [p for p in PARAMS if p.max_slew is not None]
 SHADER_PARAMS = [p for p in PARAMS if p.shader]
+# réglages qui sautent d'une valeur à l'autre : quand l'un change, le décor
+# n'est plus le même et l'historique du lissage temporel est jeté
+STRUCTURE_KEYS = [p.key for p in PARAMS if p.kind == "int"] + ["bg_seed"]
 PALETTE_KEYS = ("bg_col_mode", "bg_col_preset",
                 "bg_col_a_hue", "bg_col_a_sat", "bg_col_a_lum",
                 "bg_col_b_hue", "bg_col_b_sat", "bg_col_b_lum",
@@ -68,7 +76,9 @@ def travel_dir(v: dict) -> np.ndarray:
     """Direction du voyage (unitaire) ; azimut 0 = vers le fond de l'écran
     de la vue de départ. En Grille au sol, le voyage reste à l'horizontale."""
     az, el = math.radians(v["bg_mov_dir_az"]), math.radians(v["bg_mov_dir_el"])
-    if int(v["bg_sp_mode"]) == GROUND:
+    if int(v["bg_sp_mode"]) == GROUND and int(v["bg_nw_gen"]) == 0:
+        el = 0.0
+    if int(v["bg_nw_gen"]) == 1 and int(v["bg_nw_mode"]) == PAYSAGE:
         el = 0.0
     return np.array([math.sin(az) * math.cos(el), math.sin(el), -math.cos(az) * math.cos(el)])
 
@@ -124,6 +134,17 @@ def shape_reach(v: dict) -> tuple:
     return full, max(ext * max(sx, sz), sat), max(ext * sy_max, sat)
 
 
+def world_constants(v: dict) -> dict:
+    """Monde de bruit : seuil de la roche (quantile réel du bruit pour le
+    Remplissage), pente du bruit par unité (G) et étirement du warp."""
+    g = 16.0 * noise.max_gradient_norm()    # 2 (valeurs centrées) × 8 texels / unité
+    return {
+        "u_nw_thr": noise.centered_quantile(1.0 - v["bg_nw_fill"]),
+        "u_nw_G": g,
+        "u_nw_warpL": v["bg_nw_warp"] * 0.3 * g * math.sqrt(3.0) / v["bg_nw_warp_size"],
+    }
+
+
 def deform_stretch(v: dict) -> float:
     """Étirement maximal dû aux ondes et au warp (les pas de marche sont
     divisés d'autant) ; torsion et courbure dépendent du point : le shader
@@ -161,6 +182,8 @@ class Frame:
     light_model: bool         # éclairé par la lumière principale du modèle
     light_int: float          # intensité de cette lumière (1 = celle du modèle)
     same_space: bool          # même espace que le modèle → profondeur partagée
+    history: float = 0.0      # poids maximal de l'historique (0 = sans lissage)
+    structure: tuple = ()     # change quand le décor change de structure
 
 
 class BackgroundState:
@@ -174,6 +197,7 @@ class BackgroundState:
         self.spin = 0.0                            # rotation lente des instances (tours)
         self.orbit = 0.0                           # orbite des satellites (tours)
         self.wave_phase = 0.0                      # phase des ondes (tours)
+        self.flow = np.zeros((3, 3))               # glissement des couches du monde
         self.time = 0.0                            # temps du fond (s), figé par « Gel »
         self.clock = 0.0                           # horloge des beats (beats)
         self.beats = 0
@@ -241,6 +265,8 @@ class BackgroundState:
         self.spin = (self.spin + v["bg_sh_spin"] / 60.0 * speed * dt) % 1.0
         self.orbit = (self.orbit + v["bg_fu_orbit"] / 60.0 * speed * dt) % 1.0
         self.wave_phase = (self.wave_phase + v["bg_dx_wave_speed"] * speed * dt) % 1.0
+        for i, (d, k) in enumerate(zip(FLOW_DIRS, FLOW_SPEEDS, strict=True)):
+            self.flow[i] += d / np.linalg.norm(d) * k * v["bg_nw_flow"] * speed * dt
         phase = features.get("beat_phase")
         if v["bg_mov_music"] > 0.0 and bpm > 0.0 and phase is not None:
             if self._last_phase is not None and phase < self._last_phase - 0.5:
@@ -288,7 +314,8 @@ class BackgroundState:
                                         model_hue)
                + v["bg_col_music"] * (s["treble"] - s["bass"]) * 0.25 * dose)
         eq_gain = min(1.0, 3.0 * dose)
-        scale = v["bg_comp_scale"] * breath
+        scale0 = v["bg_comp_scale"]
+        scale = scale0 * breath
         # trajet de l'objet dans l'espace des formes : une droite fixe (la
         # dérive l'en écarte un peu sans la déplacer) ; repère (u, v, d)
         path_d = travel_dir(v)
@@ -297,8 +324,12 @@ class BackgroundState:
             path_u = np.array([1.0, 0.0, 0.0])
         path_u /= np.linalg.norm(path_u)
         path_m = np.array([path_u, np.cross(path_d, path_u), path_d])
-        path_o = offset / scale
-        offset = offset + drift
+        path_o = offset / scale0
+        # la respiration se fait autour de l'objet : ps = R·p / scale +
+        # position de l'objet / scale0. Rapportée à l'origine du décor, elle
+        # le faisait aller et venir d'autant plus que l'objet avait voyagé
+        # (±6 unités au tempo après 5 min)
+        offset = (offset + drift) * breath
         n_sat = min(int(v["bg_fu_count"]), MAX_SATELLITES)
         sats = np.zeros((MAX_SATELLITES, 3), dtype="f4")
         if n_sat:
@@ -345,12 +376,18 @@ class BackgroundState:
             "u_dx_lip": deform_stretch(v),
             "u_dx_phase": 2.0 * math.pi * self.wave_phase,
             "u_sh_angle": math.radians(v["bg_sh_rot"]) + 2.0 * math.pi * self.spin,
+            "u_nw_flow1": tuple(self.flow[0]),
+            "u_nw_flow2": tuple(self.flow[1]),
+            "u_nw_flow3": tuple(self.flow[2]),
+            **world_constants(v),
         }
 
     @staticmethod
     def _detail(v: dict) -> float:
         """Plus petit détail des formes (unités du fond) : en dessous de ~2
         pixels il se fond dans la brume au lieu de scintiller."""
+        if int(v["bg_nw_gen"]) == 1:          # monde de bruit : la couche moyenne
+            return max(v["bg_nw_scale"] * 0.3 * 0.5, 1e-3) * v["bg_comp_scale"]
         P = v["bg_sp_period"]
         if int(v["bg_sp_mode"]) == SINGLE:
             P *= SINGLE_SIZE
@@ -392,4 +429,6 @@ class BackgroundState:
             light_model=int(v["bg_light_mode"]) == 0,
             light_int=v["bg_light_int"] / 1.5,
             same_space=v["bg_comp_far"] < 1e-3,
+            history=temporal.max_weight(v["bg_temporal"], temporal.animation(v)),
+            structure=tuple(round(v[k], 3) for k in STRUCTURE_KEYS),
         )

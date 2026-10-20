@@ -41,6 +41,7 @@ GROUPS = [
     ("top", "Fond"),
     ("macro_amb", "Macros d'ambiance"),
     ("macro_form", "Macros de forme"),
+    ("nw", "Générateur et monde de bruit"),
     ("sp", "Espace"),
     ("dx", "Distorsion"),
     ("sh", "Formes"),
@@ -71,7 +72,6 @@ MACROS_FORM = [
     ("organic", "Organique ↔ Géométrique", "arrondi → anguleux"),
     ("scale", "Échelle", "micro → macro"),
     ("fill", "Vide ↔ Plein", "ajouré → massif"),
-    ("rhythm", "Rythme", "immobile → pulsé"),
     ("crystal", "Cristal ↔ Chair", "arêtes vives → matière douce"),
 ]
 
@@ -148,6 +148,11 @@ TOP = [
     Param("bg_res", "Résolution du fond", "top", 0, len(RESOLUTIONS) - 1, 1,
           step=1, options=tuple(r[0] for r in RESOLUTIONS), kind="setting",
           shader=False, tip="Fraction de la taille de rendu : ⅓ ≈ 1,5 ms sur un M3"),
+    Param("bg_temporal", "Lissage temporel", "top", 0.0, 1.0, 0.7, kind="setting",
+          shader=False,
+          tip="Mélange les frames successives (rayon décalé d'une fraction de\n"
+              "pixel à chaque frame) : contours nets, plus d'escaliers ni de\n"
+              "zébrures au loin. 0 = chaque frame seule"),
     Param("bg_seed", "Seed", "top", 0, 9999, 0, step=1, kind="setting",
           shader=False, tip="Numéro du dernier tirage « 🎲 Nouvelle forme »"),
 ]
@@ -161,6 +166,58 @@ COMBINATIONS = ("Union douce", "Creusement doux", "Intersection douce")
 DEFORM_AXES = ("Le long du trajet", "Vertical")
 MAX_SATELLITES = 8
 MAX_FOLDS = 8
+
+# ── monde de bruit (passe 4) : un monde continu en couches de bruit ──
+GENERATORS = ("Formes répétées", "Monde de bruit")
+WORLD_MODES = ("Caverne", "Nappes liquides", "Paysage")
+
+NW = _group(
+    "nw",
+    ("bg_nw_gen", "Générateur", 0, len(GENERATORS) - 1, 0,
+     dict(step=1, options=GENERATORS, kind="int", rand=(0, 1), weights=(45, 55),
+          tip="Formes répétées : la chaîne Espace → Distorsion → Formes → Fusion.\n"
+              "Monde de bruit : un monde continu (caverne, nappes, paysage) fait de\n"
+              "couches de bruit ; la Distorsion s'y applique aussi")),
+    ("bg_nw_mode", "Monde", 0, len(WORLD_MODES) - 1, 0,
+     dict(step=1, options=WORLD_MODES, kind="int", rand=(0, 2), weights=(45, 35, 20))),
+    ("bg_nw_scale", "Taille du monde", 4.0, 60.0, 16.0,
+     dict(step=0.5, law="log", kind="topology", rand=(8.0, 35.0),
+          macros={"density": -0.4, "scale": 0.6},
+          tip="Taille des grandes formes du monde (unités du fond)")),
+    ("bg_nw_fill", "Remplissage", 0.2, 0.8, 0.5,
+     dict(kind="topology", rand=(0.3, 0.65), macros={"fill": 0.15}, shader=False,
+          tip="Caverne : part de l'espace occupée par la roche")),
+    ("bg_nw_breath", "Respiration", 0.0, 0.3, 0.05,
+     dict(step=0.005, rand=(0.0, 0.15),
+          tip="Les parois gonflent et dégonflent lentement")),
+    ("bg_nw_warp", "Déformation", 0.0, 2.0, 0.6,
+     dict(kind="deform", rand=(0.2, 1.6), macros={"chaos": 0.6, "fluid": 0.4},
+          tip="Le bruit déforme le bruit : formes liquides, organiques")),
+    ("bg_nw_warp_size", "Taille de la déformation", 0.3, 2.0, 0.8,
+     dict(kind="deform", rand=(0.4, 1.5), tip="En tailles du monde")),
+    ("bg_nw_detail", "Couche moyenne", 0.0, 1.0, 0.35,
+     dict(kind="deform", rand=(0.0, 0.7), macros={"complexity": 0.3},
+          tip="Formes trois fois plus petites ajoutées au monde")),
+    ("bg_nw_fine", "Couche fine", 0.0, 0.5, 0.1,
+     dict(kind="deform", rand=(0.0, 0.3), zero=0.3, macros={"complexity": 0.15},
+          tip="Détail fin (s'efface au loin : pas de grain)")),
+    ("bg_nw_flow", "Flux (unités/s)", 0.0, 1.0, 0.12,
+     dict(kind="phase", rand=(0.02, 0.4), audio=("energy", 0.4),
+          macros={"energy": 0.15}, shader=False,
+          tip="Les couches glissent lentement, chacune dans sa direction")),
+    ("bg_nw_thick", "Épaisseur des nappes", 0.02, 0.5, 0.12,
+     dict(rand=(0.04, 0.3), macros={"fill": 0.08})),
+    ("bg_nw_gyroid", "Gyroïde dans les nappes", 0.0, 1.0, 0.4,
+     dict(kind="deform", rand=(0.0, 0.9), macros={"symmetry": 0.4},
+          tip="Mêle aux nappes un gyroïde (surface minimale) : plus ordonné")),
+    ("bg_nw_relief", "Hauteur du relief (Paysage)", 0.2, 4.0, 1.5,
+     dict(kind="topology", rand=(0.6, 3.0), tip="En tailles du monde × 0,3")),
+    ("bg_nw_vault", "Voûte (Paysage)", 0, 1, 0,
+     dict(step=1, check=True, kind="int", rand=(0, 1), tip="Un plafond : canyon")),
+    ("bg_nw_soft", "Douceur du tunnel", 0.0, 1.0, 0.5,
+     dict(rand=(0.2, 0.9),
+          tip="Le couloir du trajet est creusé dans le monde ; 1 = bords très doux")),
+)
 
 SP = _group(
     "sp",
@@ -223,12 +280,12 @@ DX = _group(
           tip="Les rangées se courbent en s'éloignant du trajet")),
     ("bg_dx_wave_amp", "Ondes : amplitude", 0.0, 0.5, 0.0,
      dict(step=0.005, kind="deform", rand=(0.0, 0.3), zero=0.5,
-          audio=("bass", 0.1), macros={"rhythm": 0.1},
+          audio=("bass", 0.1),
           tip="Fraction de la période")),
     ("bg_dx_wave_len", "Ondes : longueur", 1.0, 20.0, 8.0,
      dict(step=0.1, kind="deform", rand=(4.0, 16.0), tip="Unités du fond")),
     ("bg_dx_wave_speed", "Ondes : vitesse", 0.0, 0.2, 0.02,
-     dict(step=0.005, kind="phase", rand=(0.0, 0.1), macros={"rhythm": 0.06},
+     dict(step=0.005, kind="phase", rand=(0.0, 0.1),
           shader=False, tip="Tours par seconde : les ondes glissent lentement")),
     ("bg_dx_warp_amp", "Warp : amplitude", 0.0, 3.0, 0.0,
      dict(step=0.01, kind="deform", rand=(0.0, 2.0), zero=0.5,
@@ -274,9 +331,9 @@ SH = _group(
      dict(step=1, law="angle", rand=(0.0, 360.0), shader=False)),
     ("bg_sh_spin", "Rotation lente (tours/min)", -0.1, 0.1, 0.0,
      dict(step=0.005, kind="phase", rand=(-0.06, 0.06), zero=0.4,
-          macros={"rhythm": 0.04}, shader=False)),
+          shader=False)),
     ("bg_sh_wave", "Vague", 0.0, 1.0, 0.0,
-     dict(rand=(0.0, 0.6), zero=0.5, audio=("beat", 0.25), macros={"rhythm": 0.5},
+     dict(rand=(0.0, 0.6), zero=0.5, audio=("beat", 0.25),
           tip="Les instances gonflent l'une après l'autre, en vague, au tempo")),
 )
 
@@ -298,11 +355,11 @@ FU = _group(
      dict(rand=(0.6, 1.8), audio=("kick", 0.15),
           tip="Distance des satellites, en tailles de la forme (le KICK les écarte)")),
     ("bg_fu_orbit", "Orbite (tours/min)", 0.0, 0.5, 0.05,
-     dict(step=0.005, kind="phase", rand=(0.0, 0.3), macros={"rhythm": 0.2},
+     dict(step=0.005, kind="phase", rand=(0.0, 0.3),
           shader=False)),
     ("bg_fu_glow", "Satellites lumineux", 0.0, 3.0, 0.6,
      dict(step=0.05, kind="emissive", rand=(0.0, 2.0), audio=("kick", 0.2),
-          macros={"glow": 1.0, "rhythm": 0.5})),
+          macros={"glow": 1.0})),
 )
 
 COL = _group(
@@ -414,7 +471,7 @@ MAT = _group(
           macros={"crystal": -1.0, "glow": 0.8}, shader=False,
           tip="Les arêtes vives brillent (envoyé au shader comme u_edges)")),
     ("bg_mat_chase", "Poursuite au beat", 0.0, 1.0, 0.0,
-     dict(kind="emissive", rand=(0.0, 1.0), zero=0.6, macros={"rhythm": 0.5},
+     dict(kind="emissive", rand=(0.0, 1.0), zero=0.6,
           tip="Une instance sur quatre s'allume, à tour de rôle sur chaque beat")),
     ("bg_mat_glow", "Halo des formes", 0.0, 2.0, 0.3,
      dict(kind="emissive", rand=(0.0, 1.0), macros={"glow": 0.8, "energy": 0.3},
@@ -494,7 +551,7 @@ MOV = _group(
           tip="0 = décor fixe (l'objet voyage dedans)")),
     ("bg_mov_travel", "Vitesse du voyage (unités/s)", 0.0, 6.0, 0.6,
      dict(step=0.05, kind="phase", audio=("bass", 0.15),
-          macros={"energy": 0.4, "rhythm": 0.2}, shader=False,
+          macros={"energy": 0.4}, shader=False,
           tip="L'objet avance dans le décor fixe, la caméra le suit\n"
               "(le modèle a un rayon de 1 unité)")),
     ("bg_mov_dir_az", "Direction du voyage : azimut", 0.0, 360.0, 0.0,
@@ -502,9 +559,10 @@ MOV = _group(
           tip="0 = droit devant, vers le fond de l'écran (vue de départ)")),
     ("bg_mov_dir_el", "Direction du voyage : hauteur", -90.0, 90.0, 0.0,
      dict(step=1, rand=(-20.0, 20.0), shader=False,
-          tip="Monter ou descendre ; ignoré en Grille au sol (le sol reste au sol)")),
+          tip="Monter ou descendre ; ignoré en Grille au sol et en Paysage\n"
+              "(le sol reste au sol)")),
     ("bg_mov_breath", "Respiration", 0.0, 0.3, 0.0,
-     dict(step=0.005, rand=(0.0, 0.03), macros={"rhythm": 0.04}, shader=False,
+     dict(step=0.005, rand=(0.0, 0.03), shader=False,
           tip="Le fond grandit et rétrécit au tempo")),
     ("bg_mov_breath_beats", "Respiration : période", 0, len(BREATH_BEATS) - 1, 3,
      dict(step=1, options=tuple(b[1] for b in BREATH_BEATS), kind="int",
@@ -577,7 +635,7 @@ SOLID = [
     for c, name, v in (("r", "rouge", 4), ("g", "vert", 4), ("b", "bleu", 10))
 ]
 
-PARAMS = TOP + _macro_params() + SP + DX + SH + FU + COL + MAT + MOV + COMP + SOLID
+PARAMS = TOP + _macro_params() + NW + SP + DX + SH + FU + COL + MAT + MOV + COMP + SOLID
 BY_KEY = {p.key: p for p in PARAMS}
 MACRO_KEYS = [f"bg_m_{n}" for n, *_ in MACROS_AMB + MACROS_FORM]
 # groupes qui ont un dé et un cadenas
@@ -663,6 +721,48 @@ AMBIANCES = {
         "bg_light_el": 12.0, "bg_light_temp": 3200.0, "bg_light_shadow": 0.7,
         "bg_mat_preset": 0.0, "bg_col_mode": 3.0, "bg_col_a_hue": 0.05,
         "bg_comp_fade": 0.3},
+    "Grotte de cristal": {
+        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 0.0, "bg_nw_scale": 14.0,
+        "bg_nw_fill": 0.5, "bg_nw_warp": 0.8, "bg_nw_detail": 0.4, "bg_nw_fine": 0.12,
+        "bg_mat_preset": 2.0, "bg_mat_rough": 0.05, "bg_mat_transl": 0.8,
+        "bg_mat_fresnel": 1.6, "bg_mat_env": 1.3, "bg_col_mode": 2.0,
+        "bg_col_irid": 0.7, "bg_mat_veins": 1.2, "bg_mat_veins_size": 6.0,
+        "bg_col_emit_hue": 0.55, "bg_light_center": 1.5},
+    "Entrailles": {
+        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 0.0, "bg_nw_scale": 10.0,
+        "bg_nw_fill": 0.58, "bg_nw_warp": 1.5, "bg_nw_warp_size": 0.6,
+        "bg_nw_detail": 0.3, "bg_nw_breath": 0.12, "bg_nw_flow": 0.2,
+        "bg_mat_preset": 4.0, "bg_mat_rough": 0.35, "bg_mat_transl": 0.6,
+        "bg_mat_fresnel": 1.2, "bg_col_mode": 7.0, "bg_col_hue": 0.95,
+        "bg_mat_bump": 0.6, "bg_mat_bump_size": 0.3, "bg_mat_veins": 0.8,
+        "bg_mat_veins_size": 3.0, "bg_col_emit_hue": 0.02},
+    "Océan de mercure": {
+        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 1.0, "bg_nw_scale": 20.0,
+        "bg_nw_warp": 0.9, "bg_nw_gyroid": 0.6, "bg_nw_thick": 0.18,
+        "bg_nw_flow": 0.18, "bg_mat_preset": 1.0, "bg_mat_rough": 0.1,
+        "bg_mat_metal": 1.0, "bg_mat_fresnel": 1.0, "bg_mat_env": 1.8,
+        "bg_col_mode": 3.0, "bg_col_a_hue": 0.6, "bg_col_a_lum": 0.7,
+        "bg_mat_bump": 0.0, "bg_mat_grain": 0.0, "bg_col_hor_lum": 0.25},
+    "Membranes néon": {
+        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 1.0, "bg_nw_scale": 12.0,
+        "bg_nw_warp": 1.3, "bg_nw_gyroid": 0.2, "bg_nw_thick": 0.07,
+        "bg_nw_detail": 0.5, "bg_mat_preset": 3.0, "bg_mat_transl": 0.7,
+        "bg_mat_emit": 0.8, "bg_mat_rough": 0.4, "bg_col_mode": 5.0,
+        "bg_col_source": 5.0, "bg_mat_veins": 1.5, "bg_mat_veins_width": 0.03},
+    "Planète inconnue": {
+        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 2.0, "bg_nw_scale": 30.0,
+        "bg_nw_relief": 2.5, "bg_nw_warp": 1.0, "bg_nw_detail": 0.45,
+        "bg_nw_fine": 0.15, "bg_mat_preset": 0.0, "bg_col_mode": 1.0,
+        "bg_col_a_hue": 0.05, "bg_col_b_hue": 0.55, "bg_col_source": 0.0,
+        "bg_light_mode": 1.0, "bg_light_el": 18.0, "bg_light_temp": 4200.0,
+        "bg_light_shadow": 0.6, "bg_comp_fade": 0.4, "bg_col_hor_lum": 0.3,
+        "bg_comp_fog_glow": 1.2},
+    "Canyon voûté": {
+        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 2.0, "bg_nw_scale": 18.0,
+        "bg_nw_relief": 1.8, "bg_nw_vault": 1.0, "bg_nw_warp": 1.2,
+        "bg_nw_detail": 0.4, "bg_mat_preset": 4.0, "bg_mat_rough": 0.9,
+        "bg_col_mode": 2.0, "bg_col_source": 6.0, "bg_mat_veins": 1.0,
+        "bg_mat_veins_size": 8.0, "bg_col_emit_hue": 0.5, "bg_light_center": 2.0},
 }
 
 

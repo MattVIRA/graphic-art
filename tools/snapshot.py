@@ -9,6 +9,8 @@ comparer la qualité d'image avant / après une modification du renderer.
     python tools/snapshot.py --bg-recipe Hélices    # fond SDF (T16) : une recette
     python tools/snapshot.py --seed 42 --style surface   # chaîne tirée au dé
     python tools/snapshot.py --bg-recipe Essaim --bg-set bg_comp_void=3   # + un réglage
+    python tools/snapshot.py --bg-recipe Hélices --orbit 30,10 --orbit-speed 12,3 \
+        --frames 120 --save-every 30      # caméra qui tourne, plusieurs frames (passe 5)
 
 Sortie : captures/bench/<tag>/<scène>.png (+ temps GPU moyen par frame).
 Les features audio sont synthétiques et déterministes (silence / fort) ;
@@ -55,12 +57,26 @@ def features(level: float, t: float) -> dict:
     }
 
 
+def grab(renderer) -> Image.Image:
+    fbo = renderer.output_fbo
+    img = Image.frombytes("RGB", fbo.size, fbo.read(components=3))
+    return img.transpose(Image.FLIP_TOP_BOTTOM)
+
+
 def render_scene(ctx, renderer, particles, p, level, camera, grid=False,
-                 frames=45, decor=None):
-    """Render `frames` frames (trails settle) and return the last one + ms/frame."""
+                 frames=45, decor=None, orbit=None, stem=None, save_every=0):
+    """Render `frames` frames (trails settle) and return the last one + ms/frame.
+    orbit = (lacet, tangage, vitesse lacet, vitesse tangage) en degrés et
+    degrés/s : la caméra tourne pendant le rendu ; save_every > 0 :
+    enregistre aussi une frame sur N (`<stem>_fNNN.png`)."""
     times = []
     for i in range(frames):
         t = i / 60.0
+        if orbit is not None:
+            yaw, pitch, dyaw, dpitch = orbit
+            camera.load_state({"yaw": np.radians(yaw + dyaw * t),
+                               "pitch": np.radians(pitch + dpitch * t),
+                               "target": [0.0, 0.0, 0.0], "zoom": 1.0})
         f = features(level, t)
         rp = particles.gpu_uniforms(f, dict(p, model_turb=0.0, fx_rot=0.0),
                                     time_s=t)
@@ -94,9 +110,21 @@ def render_scene(ctx, renderer, particles, p, level, camera, grid=False,
         renderer.end_frame()
         ctx.finish()
         times.append((time.perf_counter() - t0) * 1000.0)
-    fbo = renderer.output_fbo
-    img = Image.frombytes("RGB", fbo.size, fbo.read(components=3))
-    return img.transpose(Image.FLIP_TOP_BOTTOM), float(np.median(times[5:]))
+        if save_every > 0 and (i + 1) % save_every == 0 and i < frames - 1:
+            grab(renderer).save(f"{stem}_f{i + 1:03d}.png")
+    return grab(renderer), float(np.median(times[5:]))
+
+
+def make_camera(args):
+    """Caméra orbitale du banc ; orbit = None si elle ne bouge pas."""
+    camera = OrbitCamera()
+    if not (args.orbit or args.orbit_speed):
+        return camera, None
+    yaw, pitch = (float(v) for v in (args.orbit or "0,0").split(","))
+    dyaw, dpitch = (float(v) for v in (args.orbit_speed or "0,0").split(","))
+    camera.load_state({"yaw": np.radians(yaw), "pitch": np.radians(pitch),
+                       "target": [0.0, 0.0, 0.0], "zoom": 1.0})
+    return camera, (yaw, pitch, dyaw, dpitch)
 
 
 def main():
@@ -110,6 +138,11 @@ def main():
                     help="super-échantillonnage (défaut : celui du panneau)")
     ap.add_argument("--orbit", default=None, metavar="LACET,TANGAGE",
                     help="position de la caméra orbitale en degrés (T26)")
+    ap.add_argument("--orbit-speed", default=None, metavar="LACET,TANGAGE",
+                    help="la caméra tourne pendant le rendu (degrés/s)")
+    ap.add_argument("--frames", type=int, default=45, help="frames rendues par image")
+    ap.add_argument("--save-every", type=int, default=0, metavar="N",
+                    help="enregistre aussi une frame toutes les N (_fNNN.png)")
     ap.add_argument("--grid", action="store_true", help="dessiner la grille")
     ap.add_argument("--bg-recipe", default=None, metavar="NOM",
                     help="fond SDF (T16) : une recette intégrée ("
@@ -123,11 +156,7 @@ def main():
                     help="styles rendus (répétable) ; défaut : les trois")
     args = ap.parse_args()
 
-    camera = OrbitCamera()
-    if args.orbit:
-        yaw, pitch = (float(v) for v in args.orbit.split(","))
-        camera.load_state({"yaw": np.radians(yaw), "pitch": np.radians(pitch),
-                           "target": [0.0, 0.0, 0.0], "zoom": 1.0})
+    camera, orbit = make_camera(args)
 
     out_dir = os.path.join("captures", "bench", args.tag)
     os.makedirs(out_dir, exist_ok=True)
@@ -169,10 +198,13 @@ def main():
             for level, lname in ((0.0, "silence"), (1.0, "fort")):
                 p["model_style"] = float(style)
                 renderer.fade = p["trail"]
-                img, ms = render_scene(ctx, renderer, particles, p, level,
-                                       camera, args.grid, decor=decor)
                 sname = STYLES[style]
-                path = os.path.join(out_dir, f"{name}_{sname}_{lname}.png")
+                stem = os.path.join(out_dir, f"{name}_{sname}_{lname}")
+                img, ms = render_scene(ctx, renderer, particles, p, level,
+                                       camera, args.grid, frames=args.frames,
+                                       decor=decor, orbit=orbit, stem=stem,
+                                       save_every=args.save_every)
+                path = stem + ".png"
                 img.save(path)
                 bg = f", fond {decor.gpu_ms:.2f} ms" if decor and decor.gpu_ms else ""
                 print(f"  {path}  ({ms:.2f} ms/frame{bg})")

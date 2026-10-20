@@ -11,7 +11,7 @@ from tkinter import ttk
 
 from background import schema
 
-OPEN_GROUPS = ("macro_form", "sp", "sh")   # dépliés à l'ouverture
+OPEN_GROUPS = ("nw", "sp", "sh")   # dépliés à l'ouverture
 
 
 def _widget(parent, ui, p):

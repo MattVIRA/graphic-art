@@ -220,8 +220,10 @@ uniform vec2 u_texel;              // taille d'un pixel du fond (uv)
 uniform vec2 u_near_far;           // plans de la projection (px du monde)
 uniform vec3 u_fwd;                // axe de visée de la caméra (monde)
 uniform float u_same_space;        // 1 = même espace que le modèle (Éloignement 0)
+uniform vec2 u_jitter;             // décalage du rayon (pixels du fond, passe 5)
 
 const float NO_HIT = 60000.0;      // profondeur « rien touché » (alpha du fond)
+const float MASKED = -1.0;         // arrêté par le modèle : pas du décor (resolve.glsl)
 
 // profondeur fenêtre → distance le long de l'axe de visée (px du monde)
 float eye_depth(float d) {
@@ -235,32 +237,36 @@ vec4 taps(sampler2D s, vec2 uv, vec2 o, int c) {
 }
 
 void main() {
+    // rayon décalé d'une fraction de pixel à chaque frame (suite de Halton) :
+    // la passe de résolution recompose la pleine résolution au fil des frames
+    vec2 uv = v_uv + u_jitter * u_texel;
     vec2 o = u_texel * 0.35;
     float limit_px = 1e9;      // distance de visée où le modèle arrête le rayon
     if (u_same_space > 0.5) {
         // même espace : la marche s'arrête à la surface du modèle (ce qui est
         // derrière est caché) ; la plus lointaine des 4 profondeurs du pixel
         // du fond : au bord du modèle, la marche reste complète
-        vec4 d4 = taps(u_scene_depth, v_uv, o, 0);
+        vec4 d4 = taps(u_scene_depth, uv, o, 0);
         float d = max(max(d4.x, d4.y), max(d4.z, d4.w));
         if (d < 1.0)
             limit_px = eye_depth(d);
     } else {
         // espaces séparés : pixel entièrement caché par une surface opaque
         // (marge d'un pixel et demi : pas de liseré sombre au contour)
-        vec4 a4 = taps(u_scene_alpha, v_uv, u_texel * 1.5, 3);
+        vec4 a4 = taps(u_scene_alpha, uv, u_texel * 1.5, 3);
         if (min(min(a4.x, a4.y), min(a4.z, a4.w)) > 0.999) {
-            f_color = vec4(0.0, 0.0, 0.0, NO_HIT);
+            f_color = vec4(0.0, 0.0, 0.0, MASKED);
             return;
         }
     }
-    vec4 w = u_inv_vp * vec4(v_uv * 2.0 - 1.0, 1.0, 1.0);
+    vec4 w = u_inv_vp * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
     vec3 eye = u_eye / u_unit;
     vec3 rd = normalize(w.xyz / w.w / u_unit - eye);
     // Éloignement : l'œil du fond est rapproché du centre ; le fond tourne
     // avec la caméra mais ne glisse presque plus quand elle se déplace,
     // comme un paysage lointain
     vec3 ro = eye * (1.0 - u_comp_far);
+    g_eye_s = (u_rot * ro + u_offset) / u_scale;
     float tmin = 0.0;
     float tmax = u_comp_horizon;
     float view = max(dot(rd, u_fwd), 1e-3);       // px de visée par unité de rayon / unit
@@ -312,12 +318,16 @@ void main() {
     }
     col += normalize(u_emit_col + 1e-4) * glow * u_mat_glow;
 
-    vec2 dc = (v_uv - u_center_uv) * vec2(u_aspect, 1.0);
+    vec2 dc = (uv - u_center_uv) * vec2(u_aspect, 1.0);
     float halo = exp(-dot(dc, dc) / 0.12);
     col *= max(1.0 + min(u_comp_halo, 0.0) * halo, 0.0);
     col += max(u_comp_halo, 0.0) * halo * (horizon + u_sky_col * 0.1 + 0.02);
     // alpha = profondeur de visée de la forme touchée (px), pour que le
     // composite sache si elle passe devant le modèle
     float depth = hit ? t * u_unit * view : NO_HIT;
+    // rayon arrêté par la surface du modèle : ce pixel ne dit rien du décor
+    // (l'historique ne doit pas le retenir quand le modèle s'écarte)
+    if (!hit && t_model < u_comp_horizon && t >= t_model)
+        depth = MASKED;
     f_color = vec4(max(col, 0.0) * u_comp_intensity, depth);
 }

@@ -27,12 +27,17 @@ uniform float u_dx_lip;       // étirement dû aux ondes et au warp
 uniform float u_dx_phase;     // phase des ondes (rad)
 uniform float u_sh_angle;     // rotation fixe + rotation lente des instances (rad)
 uniform sampler3D u_noise;    // bruit lisse périodique (background/noise.py)
+uniform float u_nw_thr;       // monde de bruit : seuil de la roche (quantile du bruit)
+uniform float u_nw_G;         // pente maximale du bruit par unité (taille 1)
+uniform float u_nw_warpL;     // étirement dû à la déformation du domaine
+uniform vec3  u_nw_flow1, u_nw_flow2, u_nw_flow3;   // glissement des couches
 
 const float KIFS_SIZE = 2.0;  // = params.KIFS_SIZE
 const float SINGLE_SIZE = 2.5;  // = params.SINGLE_SIZE : Objet seul, en périodes
 const float NOISE_CELLS = 8.0;  // = noise.CELLS
 const float FIT = 0.48;       // une instance tient dans 48 % de sa cellule
 const float FAR = 1e5;
+const float TERRAIN_SLOPE = 2.5;   // pente maximale prise en compte (Paysage)
 
 float void_radius() {
     return u_comp_void / u_scale;
@@ -417,10 +422,99 @@ vec3 shape(Inst I) {
     return vec3(d, clamp(length(q) / max(u_reach * I.k, 1e-3), 0.0, 1.0), sat);
 }
 
+// ── Monde de bruit (passe 4) : un monde continu en couches ───────────
+// Le champ F est la somme de couches de bruit lues dans la texture 3D,
+// toutes déformées par une autre lecture (domain warping : formes
+// liquides). Chaque couche glisse à sa vitesse (flux). F n'est pas une
+// distance : on la divise par sa pente maximale (lip), calculée avec les
+// seules couches visibles à cette distance.
+
+// couche centrée (≈ −1 … 1) de taille `size`, canal c, glissée de `flow`
+float nw_layer(vec3 q, float size, vec3 flow, int c) {
+    return (texture(u_noise, (q + flow) / (size * NOISE_CELLS))[c] - 0.5) * 2.0;
+}
+
+// F au point q ; lip = pente maximale de F par unité ; fine : part des
+// couches moyenne et fine encore visibles (> ~8 px) à cette distance
+float nw_field(vec3 q, out float lip) {
+    float S = u_nw_scale;
+    float foot = max(length(q - g_eye_s) * u_pix, 1e-4);   // taille d'un pixel ici
+    // effacées tôt (sous ~8 px) : elles imposent les plus petits pas, et
+    // le relief de surface (passe 3) dessine déjà le détail au loin
+    float w2 = u_nw_detail * smoothstep(4.0, 12.0, S * 0.3 / foot);
+    float w3 = u_nw_fine * smoothstep(4.0, 12.0, S * 0.08 / foot);
+    vec3 warp = texture(u_noise, (q + u_nw_flow1 * 0.6) / (S * u_nw_warp_size * NOISE_CELLS)).rgb;
+    vec3 qw = q + (warp - 0.5) * 2.0 * u_nw_warp * 0.3 * S;
+    float F = nw_layer(qw, S, u_nw_flow1, 0);
+    if (w2 > 0.001) F += w2 * nw_layer(qw, S * 0.3, u_nw_flow2, 1);
+    if (w3 > 0.001) F += w3 * nw_layer(qw, S * 0.08, u_nw_flow3, 2);
+    lip = u_nw_G / S * (1.0 + w2 / 0.3 + w3 / 0.08) * (1.0 + u_nw_warpL);
+    return F;
+}
+
+// (distance, structure, hasard, émission) ; p : point d'origine (couloir),
+// q : point déformé par la Distorsion, lip : son étirement
+vec4 world(vec3 p, vec3 q, float lip) {
+    float S = u_nw_scale;
+    int mode = int(u_nw_mode + 0.5);
+    float lipF, F, d;
+    float rv = void_radius();
+    if (mode == 2) {
+        // Paysage : un terrain h(x, z) sous le trajet, en vallée le long du
+        // couloir ; la Voûte ajoute un plafond (canyon)
+        F = nw_field(vec3(q.x, 0.0, q.z), lipF);
+        float floor_y = u_path_o.y - 2.2 / u_scale;
+        float H = u_nw_relief * 0.3 * S;
+        // vallée : distance au trajet à l'horizontale (le trajet est
+        // horizontal, x du repère du trajet) — en 3D, le terrain dépendait
+        // de la hauteur et recouvrait la caméra
+        float valley = smoothstep(rv, rv + 0.6 * S, abs(path_local(p).x));
+        float h = floor_y + H * F;
+        h = mix(min(h, floor_y), h, valley);
+        // pente bornée : la pente maximale théorique du bruit (souvent > 50)
+        // ferait des pas minuscules qui s'épuisent devant la caméra ; un
+        // terrain se marche avec une fraction de l'écart vertical
+        float slope = min(H * lipF + H * 2.0 / (0.6 * S), TERRAIN_SLOPE);
+        d = (q.y - h) / sqrt(1.0 + slope * slope);
+        if (u_nw_vault > 0.5) {
+            float F2 = nw_layer(vec3(q.x, 0.0, q.z), S * 0.7, u_nw_flow2, 1);
+            float top = floor_y + 2.2 * H + 6.0 / u_scale - H * F2;
+            top = mix(max(top, u_path_o.y + rv), top, valley);
+            float slope2 = min(H * u_nw_G / (0.7 * S) + H * 2.0 / (0.6 * S), TERRAIN_SLOPE);
+            d = min(d, (top - q.y) / sqrt(1.0 + slope2 * slope2));
+        }
+        d /= min(lip, TERRAIN_SLOPE);
+    } else {
+        F = nw_field(q, lipF);
+        float thr = u_nw_thr + u_nw_breath * sin(u_time * 0.35);
+        if (mode == 0) {
+            d = (thr - F) / lipF;                            // Caverne : roche où F > seuil
+        } else {
+            // Nappes liquides : membranes autour de F = seuil, mêlées à un
+            // gyroïde déformé (surface minimale : plus ordonné)
+            float f = 2.0 * PI / (S * 0.5);
+            vec3 qg = q + vec3(0.0, u_nw_flow2.y, 0.0);
+            float g = dot(sin(qg * f), cos(qg.yzx * f)) / 1.5;
+            float M = mix(F - thr, g, u_nw_gyroid);
+            float lipM = mix(lipF, f * 1.8, u_nw_gyroid);
+            d = (abs(M) - u_nw_thick) / lipM;
+        }
+        d /= lip;
+        // le couloir du trajet est un tunnel creusé dans le monde
+        d = smax_poly(d, rv - path_dist(p), max(u_nw_soft * rv, 1e-3));
+    }
+    float h = smoothstep(0.25, 0.75, texture(u_noise, q / (S * 4.0 * NOISE_CELLS)).b);
+    float on = mod(floor(h * 4.0) + floor(u_beat), 4.0) < 0.5 ? 2.0 : 0.0;
+    return vec4(d, clamp(0.5 + 0.5 * F, 0.0, 1.0), h, u_mat_chase * on);
+}
+
 // (distance, structure, hasard de l'instance, émission)
 vec4 chain(vec3 p) {
     float lip = 1.0;
-    Inst I = space(distort(p, lip));
+    vec3 pd = distort(p, lip);
+    if (u_nw_gen > 0.5)
+        return world(p, pd, lip);
+    Inst I = space(pd);
     float d = FAR;
     vec3 sh = vec3(0.0);
     if (I.k > 0.01) {

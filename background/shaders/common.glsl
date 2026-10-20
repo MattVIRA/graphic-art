@@ -27,6 +27,10 @@ uniform float u_detail;     // plus petit détail des formes (unités du fond)
 
 const float PI = 3.14159265;
 
+// œil du fond dans l'espace des formes (posé par main() avant la marche) :
+// le monde de bruit efface ses couches fines au loin
+vec3 g_eye_s = vec3(0.0);
+
 float hash13(vec3 p) {
     p = fract(p * 0.1031);
     p += dot(p, p.zyx + 31.32);

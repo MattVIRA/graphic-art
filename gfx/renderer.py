@@ -528,11 +528,10 @@ uniform sampler2D u_bloom;
 uniform float u_bloom_intensity;
 uniform float u_brightness;   // exposure (linear multiplier)
 uniform vec3  u_bg;           // background color (display space)
-uniform sampler2D u_bgtex;    // fond SDF (T16, HDR linéaire ; alpha = profondeur de visée)
+uniform sampler2D u_bgtex;    // fond SDF (T16, HDR linéaire ; alpha = part devant le modèle)
 uniform float u_bg_on;        // 0 = pas de fond : rendu identique à avant T16
 uniform float u_bg_depth;     // 1 = même espace : une forme peut passer devant le modèle
 uniform sampler2D u_depth;    // profondeur de la scène (0–1)
-uniform vec2  u_near_far;
 uniform vec3  u_gain;         // per-channel RGB gain
 uniform float u_contrast;     // post contrast around 0.5
 uniform float u_invert;       // 0 = normal, 1 = negative
@@ -600,11 +599,10 @@ void main() {
         vec3 under = hdr + bg.rgb * (1.0 - clamp(c.a, 0.0, 1.0));
         float d = texture(u_depth, v_uv).r;
         if (u_bg_depth > 0.5 && d < 1.0) {
-            // même espace : la forme plus proche que le modèle le cache
-            float n = u_near_far.x, f = u_near_far.y;
-            float zm = 2.0 * n * f / (f + n - (d * 2.0 - 1.0) * (f - n));
-            float front = clamp((zm - bg.a) / (zm * 0.01), 0.0, 1.0);
-            hdr = mix(under, bg.rgb, front);
+            // même espace : la forme plus proche que le modèle le cache ;
+            // la part devant le modèle est accumulée comme la couleur
+            // (background/shaders/resolve.glsl) : contour anti-crénelé
+            hdr = mix(under, bg.rgb, clamp(bg.a, 0.0, 1.0));
         } else {
             hdr = under;
         }
@@ -1211,7 +1209,8 @@ class GLRenderer:
         self._bg = None if bg_pass is None else (bg_pass, frame, view, scale, unit)
 
     def _draw_background(self):
-        """Dessine le fond dans sa texture ; rend (texture, gain du bloom)."""
+        """Dessine le fond, puis le résout à la taille interne (accumulation
+        temporelle, agrandissement) ; rend (texture, frame du fond)."""
         bg_pass, frame, view, scale, unit = self._bg
         rw, rh = self._internal_size
         size = (max(8, int(rw * scale)), max(8, int(rh * scale)))
@@ -1242,7 +1241,9 @@ class GLRenderer:
             camera["u_sun_col"] = tuple(KEY_LIGHT_COLOR / np.pi * frame.light_int)
         self._scene_tex.use(4)   # couverture du modèle (espaces séparés)
         self._depth_tex.use(5)   # profondeur du modèle (même espace)
-        return bg_pass.render(frame, size, camera), frame
+        tex = bg_pass.render(frame, size, camera, self._proj, view, unit,
+                             self._internal_size)
+        return tex, frame
 
     def end_frame(self):
         """Resolve MSAA, merge into the trails, bloom chain, composite."""
@@ -1310,7 +1311,6 @@ class GLRenderer:
         cp["u_bg_on"].value = 0.0 if bg_tex is self._bg_dummy else 1.0
         cp["u_bg_depth"].value = 1.0 if bg_frame is not None and bg_frame.same_space else 0.0
         cp["u_depth"].value = 5
-        cp["u_near_far"].value = (NEAR, FAR)
         bg_tex.use(2)
         self._depth_tex.use(5)
         cp["u_vignette"].value = float(self.vignette)
