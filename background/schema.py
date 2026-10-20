@@ -221,7 +221,7 @@ VO = _group(
     ("bg_vo_twist", "Torsion (tours / 100 unités)", 0.0, 3.0, 0.0,
      dict(step=0.05, kind="deform", rand=(0.0, 1.5), zero=0.7,
           tip="L'espace tourne autour du trajet en avançant : le sol devient\n"
-              "une spirale")),
+              "une spirale près du trajet, et redevient un sol au loin")),
     ("bg_vo_bend", "Courbure", -3.0, 3.0, 0.0,
      dict(step=0.05, kind="deform", rand=(-2.0, 2.0), zero=0.6,
           tip="Le relief se relève (ou plonge) en s'éloignant du trajet")),
@@ -527,7 +527,21 @@ SOLID = [
     Param(f"bg_{c}", f"Couleur unie : {name}", "solid", 0, 255, v, step=1,
           kind="setting", shader=False)
     for c, name, v in (("r", "rouge", 4), ("g", "vert", 4), ("b", "bleu", 10))
-]
+] + _group(
+    # grille posée sur le relief (« Grille du décor » cochée, fond visible) ;
+    # fond masqué, c'est l'ancienne grille plate qui est dessinée
+    "solid",
+    ("bg_grid_size", "Grille : taille des mailles", 0.5, 20.0, 3.0,
+     dict(step=0.1, kind="setting",
+          tip="Unités du fond (le modèle a un rayon de 1) ;\n"
+              "les lignes suivent le relief et le trajet")),
+    ("bg_grid_width", "Grille : épaisseur (pixels)", 0.5, 4.0, 1.2,
+     dict(step=0.1, kind="setting")),
+    ("bg_grid_int", "Grille : intensité", 0.0, 4.0, 1.0,
+     dict(step=0.05, kind="setting", shader=False)),
+    ("bg_grid_hue", "Grille : teinte", 0.0, 1.0, 0.64,
+     dict(law="angle", kind="setting", shader=False)),
+)
 
 PARAMS = TOP + _macro_params() + LD + VO + COL + MAT + MOV + COMP + SOLID
 BY_KEY = {p.key: p for p in PARAMS}

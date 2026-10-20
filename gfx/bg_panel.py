@@ -99,9 +99,9 @@ def build(tab, ui):
                            {p.key: 0.5 for p in schema.params_of(g)})
                        ).pack(fill="x", padx=8, pady=(4, 0))
         for p in schema.params_of(group):
+            if p.key == "bg_grid_size":
+                ui.check(body, "Grille du décor", "show_grid", pady=(6, 0))
             _widget(body, ui, p)
-        if group == "solid":
-            ui.check(body, "Grille du décor", "show_grid", pady=(6, 0))
         ttk.Frame(body).pack(pady=2)   # respiration en bas du groupe
 
     # un préréglage de matière règle d'un coup plusieurs sliders

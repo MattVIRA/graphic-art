@@ -73,8 +73,8 @@ def draw(renderer, p: dict, fx: dict, rp: dict, axis_precession: float):
         obj_tilt=p["obj_tilt"] * DEG,
     )
     renderer.begin_frame()
-    if p["show_grid"] >= 0.5:
-        renderer.draw_grid()
+    if p["show_grid"] >= 0.5 and p["bg_visible"] < 0.5:
+        renderer.draw_grid()      # fond visible : la grille est posée sur le relief
     if p["show_axis"] >= 0.5:
         renderer.draw_axis()
     model_style = int(p["model_style"])   # 0 points, 1 surface, 2 wireframe

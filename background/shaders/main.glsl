@@ -24,13 +24,21 @@ float g_fog_h0 = 0.0, g_fog_dy = 0.0;
 // + une part uniforme qui efface l'horizon. Avant : une brume uniforme
 // deux fois plus dense, plus sombre que le relief — tout noircissait à
 // une vingtaine d'unités. Un détail plus fin que ~3 pixels s'y fond aussi
-// (pas de grain ni de moiré au loin).
+// (pas de grain ni de moiré au loin). La densité est plafonnée à son
+// niveau d'une hauteur de brume sous le fond de la vallée : sans plafond,
+// elle grandissait en exponentielle de la profondeur, et un rayon qui
+// passait sous le fond (torsion, cavités) s'y noyait en quelques unités —
+// un trou sombre, comme un décor pas chargé.
 float haze(float t) {
     float hs = max(u_comp_fog_height * relief_height(), 0.5 / u_scale);
-    float a = g_fog_dy / (u_scale * hs);
-    float at = max(a * t, -10.0);
-    float path = abs(at) < 1e-4 ? t : (1.0 - exp(-at)) / a;
-    float tau = u_comp_fade * (0.03 * exp(-max(g_fog_h0, -hs) / hs) * path + 0.006 * t);
+    float a = g_fog_dy / (u_scale * hs);         // montée (÷ hs) par unité de rayon
+    float h0 = max(g_fog_h0, -hs) / hs;          // hauteur de départ (÷ hs), ≥ −1
+    // en descendant, le plafond est atteint à tc ; au-delà, densité constante
+    float tc = a < -1e-6 ? min(t, (1.0 + h0) / -a) : t;
+    float at = max(a * tc, -60.0);
+    float path = abs(at) < 1e-4 ? tc : (1.0 - exp(-at)) / a;
+    float dens = exp(-h0) * path + exp(1.0) * max(t - tc, 0.0);
+    float tau = u_comp_fade * (0.03 * dens + 0.006 * t);
     float fog = 1.0 - exp(-tau);
     float px = u_detail / max(t * u_pix, 1e-6);
     return max(fog, 1.0 - smoothstep(2.5, 8.0, px));
@@ -249,6 +257,22 @@ vec3 shade(vec3 pos, vec3 rd, float t, float tmax, float steps_frac) {
     return col;
 }
 
+// grille posée sur le relief, façon « meshgrid » : lignes à x et z
+// constants du terrain (point déformé : elle suit torsion, ondes, warp),
+// alignées sur le trajet, fixes dans le décor. Largeur en pixels du fond
+// par les dérivées d'écran : appelée hors de toute branche par pixel. Une
+// maille de moins de ~4 pixels (au loin, ou au bord d'une forme où le
+// point saute) s'efface : ni moiré ni liseré
+float grid_lines(vec3 pos) {
+    vec3 ps = (u_rot * pos + u_offset) / u_scale;
+    float lip = 1.0, clear;
+    vec2 c = (u_path_m * distort(ps, lip, clear)).xz / u_grid_size;
+    vec2 fw = max(fwidth(c), 1e-6);
+    vec2 d = abs(fract(c - 0.5) - 0.5) / fw;            // pixels jusqu'à la ligne
+    vec2 line = 1.0 - smoothstep(0.5 * u_grid_width - 0.5, 0.5 * u_grid_width + 0.5, d);
+    return max(line.x, line.y) * smoothstep(3.0, 6.0, 1.0 / max(fw.x, fw.y));
+}
+
 uniform sampler2D u_scene_alpha;   // scène de la frame (alpha 1 = surface opaque)
 uniform sampler2D u_scene_depth;   // profondeur de la scène (0–1, fenêtre)
 uniform vec2 u_texel;              // taille d'un pixel du fond (uv)
@@ -340,6 +364,10 @@ void main() {
     // couleur de la brume, proche de celle des formes lointaines — le
     // traiter comme touché donnait des stries
 
+    float grid = 0.0;
+    if (dot(u_grid_col, u_grid_col) > 0.0)      // uniforme : dérivées valides
+        grid = grid_lines(ro + rd * t);
+
     vec3 horizon = sky(rd);
     vec3 col = horizon;
     // pas épuisés tout près d'une surface : elle est touchée
@@ -352,7 +380,7 @@ void main() {
         col = mix(avg * 0.5, horizon, haze(t));
     }
     if (hit) {
-        col = shade(ro + rd * t, rd, t, u_comp_horizon, steps_frac);
+        col = shade(ro + rd * t, rd, t, u_comp_horizon, steps_frac) + u_grid_col * grid;
         // pas de coupe nette à l'horizon
         float f = max(haze(t), smoothstep(0.75 * u_comp_horizon, u_comp_horizon, t));
         col = mix(col, horizon, f);

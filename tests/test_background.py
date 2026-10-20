@@ -316,6 +316,47 @@ def test_the_object_travels_through_a_fixed_decor():
     assert np.allclose(np.asarray(later.uniforms["u_rot"]), np.eye(3).T.flatten())  # décor fixe
 
 
+def test_twist_and_waves_stay_put_while_the_object_travels():
+    # le shader compte l'abscisse depuis l'objet (a.z) + la phase : un point
+    # fixe du décor doit garder le même angle de torsion et d'ondes
+    st = BackgroundState()
+    p = settings(bg_mov_travel=3.0, bg_mov_drift=0.0, bg_vo_twist=2.0,
+                 bg_vo_wave_amp=2.0, bg_vo_wave_len=17.0, bg_mov_dir_az=40.0)
+    q = np.array([5.0, -2.0, 11.0])                      # point du décor
+
+    def angles(frame):
+        u = frame.uniforms
+        d = np.asarray(u["u_path_m"]).reshape(3, 3).T[2]
+        z = float(np.dot(q - np.asarray(u["u_path_o"]), d))
+        tw = 2.0 * math.pi * 0.02 * z + u["u_vo_twist_ph"]
+        wa = 2.0 * math.pi / 17.0 * z + u["u_vo_wave_ph"]
+        return np.array([math.cos(tw), math.sin(tw), math.cos(wa), math.sin(wa)])
+
+    first = angles(run(st, p))
+    later = angles(run(st, p, dt=0.5, steps=40))        # 20 s, 60 unités plus loin
+    assert np.allclose(first, later, atol=1e-6)
+
+
+def test_grid_follows_the_checkbox_and_intensity():
+    on = run(BackgroundState(), settings(show_grid=1.0)).uniforms["u_grid_col"]
+    assert max(on) > 0.0
+    for kw in ({"show_grid": 0.0}, {"show_grid": 1.0, "bg_grid_int": 0.0}):
+        assert run(BackgroundState(), settings(**kw)).uniforms["u_grid_col"] == (0.0,) * 3
+
+
+def test_flat_grid_only_when_the_decor_is_hidden():
+    from unittest.mock import MagicMock
+
+    from app.frame import draw
+    from gfx.controls import DEFAULTS
+
+    for visible, flat in ((0.0, True), (1.0, False)):
+        r = MagicMock(has_mesh=False)
+        draw(r, dict(DEFAULTS, show_grid=1.0, bg_visible=visible),
+             {"Rim": 0.0, "Lumière": 0.0}, {"angle": 0.0, "scale": 1.0}, 0.0)
+        assert r.draw_grid.called == flat
+
+
 def test_default_direction_goes_into_the_screen():
     assert np.allclose(travel_dir(schema.defaults()), (0.0, 0.0, -1.0))
     for az in (0.0, 90.0, 217.0):                      # le sol reste au sol

@@ -23,6 +23,9 @@ uniform mat3  u_path_m;     // repère du trajet : x, y en travers, z le long
 uniform float u_detail;     // plus petit détail visible (unités du fond)
 uniform vec3  u_model_c;    // centre du modèle (unités du fond, monde)
 uniform float u_model_r;    // rayon de l'ombre du modèle (unités du fond)
+uniform float u_vo_twist_ph; // phase de la torsion, des ondes : abscisse de
+uniform float u_vo_wave_ph;  // l'objet sur le trajet (décor fixe en voyage)
+uniform vec3  u_grid_col;   // grille sur le relief (0 = sans grille)
 
 const float PI = 3.14159265;
 

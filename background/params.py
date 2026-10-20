@@ -220,8 +220,9 @@ class BackgroundState:
         self.palette = palettes.to_linear(rgb)
         self.palette_rev += 1
 
-    def _derived(self, v: dict, model_hue: float) -> dict:
-        """Uniforms calculés (matrices, couleurs, horloges)."""
+    def _derived(self, v: dict, model_hue: float, grid: bool) -> dict:
+        """Uniforms calculés (matrices, couleurs, horloges) ; grid : « Grille
+        du décor » cochée."""
         s = self.sources
         dose = v["bg_mov_music"]
         roll = rotation((0.0, 0.0, 1.0), math.radians(v["bg_comp_roll"]))
@@ -261,6 +262,13 @@ class BackgroundState:
         # le faisait aller et venir d'autant plus que l'objet avait voyagé
         # (±6 unités au tempo après 5 min)
         offset = (offset + drift) * breath
+        # torsion et ondes : le shader compte l'abscisse le long du trajet
+        # depuis l'objet (précise en float32), la phase rend l'abscisse
+        # depuis l'origine du décor (float64). Sans elle, la spirale suivait
+        # l'objet : le décor tournait sous lui pendant le voyage
+        along = float(np.dot(path_o, path_d))
+        twist_ph = 2.0 * math.pi * v["bg_vo_twist"] * 0.01 * along
+        wave_ph = 2.0 * math.pi / v["bg_vo_wave_len"] * along
         sky = lin_hsv(v["bg_light_sky_hue"], 0.45, 1.0)
         return {
             "u_path_o": tuple(path_o),
@@ -289,6 +297,10 @@ class BackgroundState:
             "u_hue_rot": hue_rot,
             "u_edges": v["bg_mat_edges"],
             "u_vo_lip": volume_stretch(v),
+            "u_vo_twist_ph": twist_ph % (2.0 * math.pi),
+            "u_vo_wave_ph": wave_ph % (2.0 * math.pi),
+            "u_grid_col": tuple(c * v["bg_grid_int"] * grid
+                                for c in lin_hsv(v["bg_grid_hue"], 0.6, 1.0)),
             "u_vo_cave_thr": cave_threshold(v),
             # 2 (centré) × 8 texels / unité
             "u_vo_G": 16.0 * noise.gradient_norm(NOISE_QUANTILE),
@@ -311,7 +323,7 @@ class BackgroundState:
         self._advance(v, features, dt)
         self._update_palette(v)
         uniforms = {q.uniform: float(v[q.key]) for q in SHADER_PARAMS}
-        uniforms.update(self._derived(v, model_hue))
+        uniforms.update(self._derived(v, model_hue, p.get("show_grid", 0.0) >= 0.5))
         return Frame(
             visible=v["bg_visible"] >= 0.5,
             quality=int(v["bg_quality"]),

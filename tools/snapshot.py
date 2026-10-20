@@ -100,7 +100,7 @@ def render_scene(ctx, renderer, particles, p, level, camera, grid=False,
                                obj_tilt=p["obj_tilt"] * deg)
         t0 = time.perf_counter()
         renderer.begin_frame()
-        if grid:
+        if grid and decor is None:   # fond visible : grille posée sur le relief
             renderer.draw_grid()
         style = int(p["model_style"])
         if style > 0 and renderer.has_mesh:
@@ -182,7 +182,8 @@ def main():
             p.update(bg_schema.AMBIANCES[name])
         if args.seed is not None:
             p.update(bg_schema.random_values(args.seed))
-        p.update(bg_visible=1.0, bg_quality=float(args.bg_quality))
+        p.update(bg_visible=1.0, bg_quality=float(args.bg_quality),
+                 show_grid=1.0 if args.grid else 0.0)
         for item in args.bg_set:
             key, value = item.split("=")
             p[key] = float(value)

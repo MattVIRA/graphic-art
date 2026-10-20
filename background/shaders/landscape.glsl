@@ -12,7 +12,8 @@
 // le relief (surplombs, espace tordu), les cavités et les bulles creusent
 // ou ajoutent de la matière en 3D. Tout s'éteint près du trajet (le
 // couloir de l'objet reste libre), sauf la torsion autour du trajet, qui
-// le laisse en place. Le relief est fixe : rien ne bouge avec le temps.
+// le laisse en place (elle s'éteint au loin). Le relief est fixe : rien ne
+// bouge avec le temps ni avec le voyage.
 // Unités du fond : le modèle a un rayon de 1.
 
 uniform sampler3D u_noise;        // bruit lisse périodique (background/noise.py)
@@ -38,6 +39,8 @@ const float VALLEY_RELIEF = 0.3;  // part des grandes couches gardée au fond de
 const float RELIEF_K = 0.1;       // hauteur (tailles du monde) par unité de Hauteur
 const float WARP_GAIN = 0.3;      // = params.WARP_GAIN : déplacement / (warp × taille)
 const float BUBBLE_MAX = 0.45;    // = params.BUBBLE_MAX : rayon + écart ≤ 45 % de la cellule
+const float TWIST_REACH = 0.25;   // torsion pleine jusqu'à vallée + ¼ de flanc…
+const float TWIST_FADE = 1.0;     // … puis éteinte sur un flanc
 const float FAR = 1e5;
 
 // quatre nombres au hasard par cellule en un seul hachage (présence, rayon,
@@ -171,10 +174,18 @@ vec3 distort(vec3 p, inout float lip, out float clear) {
     float dfade = (rc > rv && rc < rv + W) ? 1.5 / W : 0.0;   // pente de l'extinction
     clear = rv - rc;
     if (u_vo_twist > 0.0) {
-        // autour du trajet : le couloir reste en place, pas d'extinction
+        // autour du trajet : le couloir reste en place. Au loin, la torsion
+        // s'éteint : sinon l'air tournait avec le sol et, passé un quart de
+        // tour, il n'y avait plus de sol sous le trajet (un vide sans fond,
+        // noyé de brume). On mélange les points, pas les angles : l'angle
+        // grandit sans fin le long du trajet, sa pente en travers n'aurait
+        // pas de borne ; l'écart |R·a − a| ≤ 2 rc, lui, est borné
         float w = 2.0 * PI * u_vo_twist * 0.01;
-        a.xy = rot2(w * a.z) * a.xy;
-        lip *= sqrt(1.0 + w * w * rc * rc);
+        float r0 = rv + TWIST_REACH * W, rw = TWIST_FADE * W;
+        float g = smoothstep(r0, r0 + rw, rc);
+        float dg = (rc > r0 && rc < r0 + rw) ? 1.5 / rw : 0.0;
+        a.xy = mix(rot2(w * a.z + u_vo_twist_ph) * a.xy, a.xy, g);
+        lip *= (1.0 - g) * sqrt(1.0 + w * w * rc * rc) + g + 2.0 * rc * dg;
     }
     if (u_vo_bend != 0.0) {
         float k = u_vo_bend * 0.01;
@@ -185,7 +196,7 @@ vec3 distort(vec3 p, inout float lip, out float clear) {
     if (u_vo_wave_amp > 0.0) {
         float A = u_vo_wave_amp * fade;
         float k = 2.0 * PI / u_vo_wave_len;
-        a.x += A * sin(k * a.z);
+        a.x += A * sin(k * a.z + u_vo_wave_ph);
         a.y += A * sin(k * 0.73 * a.x + 1.7);
     }
     if (u_vo_warp > 0.0) {
