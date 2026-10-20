@@ -47,6 +47,7 @@ GROUPS = [
     ("vo", "Volume : distorsion, cavités, bulles"),
     ("col", "Couleur"),
     ("mat", "Matière et lumière"),
+    ("tex", "Texture du relief"),
     ("mov", "Mouvement"),
     ("comp", "Composition"),
     ("solid", "Couleur unie et grille"),
@@ -96,6 +97,7 @@ class Param:
     tip: str = None
     weights: tuple = None          # dé : poids de chaque valeur de la plage `rand`
     zero: float = 0.0              # dé : probabilité de tirer 0 (effet éteint)
+    only: tuple = None             # (clé d'un menu, valeurs) : réglage propre à ces choix
 
     @property
     def uniform(self) -> str:
@@ -433,6 +435,116 @@ MAT = _group(
           tip="Le soleil s'allume sur la caisse claire")),
 )
 
+# ── texture du relief (T29) : une décoration peinte sur le relief, fixe ──
+# Le motif dit quelle forme dessine la texture, rendue en chrome
+# (main.glsl) ; les réglages communs déforment le motif selon le relief
+# (comme l'outil de réaction-diffusion de Karl Sims). Ni musique ni
+# macros : la texture est collée au décor (validate()). Motif « Aucun » =
+# la matière du groupe « Matière et lumière », image d'avant T29.
+TEX_MOTIFS = ("Aucun", "Volutes", "Vermicelles", "Coulures", "Gouttes", "Cellules",
+              "Strates", "Isolignes", "Veines")
+TEX_ORIENTS = ("Selon les courbes de niveau", "Fixe")
+TEX_FIELDS = ("Aucun", "Altitude", "Pente", "Creux", "Crêtes")
+TEX_ESSENTIAL = ("bg_tex_scale", "bg_tex_density", "bg_tex_width", "bg_tex_sharp",
+                 "bg_tex_shine")
+
+TEX = _group(
+    "tex",
+    ("bg_tex_motif", "Motif", 0, len(TEX_MOTIFS) - 1, 0,
+     dict(step=1, options=TEX_MOTIFS, kind="int", rand=(0, 8),
+          weights=(20, 10, 10, 10, 10, 10, 10, 10, 10),
+          tip="La forme que la texture dessine sur le relief.\n"
+              "Aucun = la matière du groupe « Matière et lumière »")),
+    # essentiel
+    ("bg_tex_scale", "Échelle", 0.3, 20.0, 3.0,
+     dict(law="log", kind="color", rand=(1.0, 8.0),
+          tip="Taille du motif (unités du fond ; le modèle a un rayon de 1)")),
+    ("bg_tex_density", "Densité", 0.5, 4.0, 1.5,
+     dict(law="log", kind="color", rand=(0.8, 3.0),
+          tip="Nombre de traits ou de volutes dans une forme du motif")),
+    ("bg_tex_width", "Épaisseur", 0.05, 0.95, 0.5,
+     dict(kind="color", rand=(0.25, 0.75),
+          tip="Part des formes face à l'entre-formes : traits fins ↔ épais")),
+    ("bg_tex_sharp", "Netteté des bords", 0.0, 1.0, 0.6,
+     dict(kind="color", rand=(0.3, 1.0), tip="Bord flou ↔ tranché")),
+    ("bg_tex_shine", "Éclat", 0.0, 1.0, 0.8,
+     dict(kind="color", rand=(0.5, 1.0), tip="Chrome mat ↔ poli comme un miroir")),
+    # échelle variable
+    # (la densité varie, pas la taille des formes : une taille variable
+    # déchirerait le motif loin de l'origine du décor)
+    ("bg_tex_scale_alt", "Densité selon l'altitude", -1.0, 1.0, 0.0,
+     dict(kind="color", rand=(-0.6, 0.6), zero=0.4,
+          tip="> 0 : traits plus serrés en haut ; < 0 : plus serrés en bas")),
+    ("bg_tex_scale_slope", "Densité selon la pente", -1.0, 1.0, 0.0,
+     dict(kind="color", rand=(-0.6, 0.6), zero=0.4,
+          tip="> 0 : traits plus serrés sur les pentes ; < 0 : plus lâches")),
+    ("bg_tex_scale_rand", "Densité aléatoire", 0.0, 1.0, 0.0,
+     dict(kind="color", rand=(0.0, 0.6), zero=0.4,
+          tip="La densité varie par grandes nappes de bruit")),
+    # flux : déformation du motif par le relief
+    ("bg_tex_flow_slope", "Flux : suivre la pente", -2.0, 2.0, 0.8,
+     dict(kind="color", rand=(-1.5, 1.5),
+          tip="Le motif est entraîné dans le sens de la pente : il coule")),
+    ("bg_tex_flow_iso", "Flux : suivre les courbes de niveau", -2.0, 2.0, 0.0,
+     dict(kind="color", rand=(-1.5, 1.5), zero=0.3,
+          tip="Le motif s'enroule autour des collines")),
+    ("bg_tex_flow_swirl", "Flux : tourbillons", 0.0, 2.0, 0.5,
+     dict(kind="color", rand=(0.0, 1.5), tip="Turbulence en spirales")),
+    ("bg_tex_flow_bubble", "Flux : bulles", -2.0, 2.0, 0.0,
+     dict(kind="color", rand=(-1.5, 1.5), zero=0.5,
+          tip="Le motif gonfle autour des sommets (> 0) ou des creux (< 0)")),
+    # orientation
+    ("bg_tex_stretch", "Étirement", 0.0, 4.0, 0.0,
+     dict(kind="color", rand=(0.0, 3.0), zero=0.3, tip="Motif rond ↔ en longs traits")),
+    ("bg_tex_orient", "Direction de l'étirement", 0, len(TEX_ORIENTS) - 1, 0,
+     dict(step=1, options=TEX_ORIENTS, kind="int", rand=(0, 1), weights=(70, 30),
+          tip="Les traits suivent les courbes de niveau du relief, ou une\n"
+              "direction fixe (angle ci-dessous)")),
+    ("bg_tex_angle", "Angle (direction fixe)", 0.0, 180.0, 0.0,
+     dict(step=1, law="angle", kind="color", rand=(0.0, 180.0),
+          only=("bg_tex_orient", (1,)))),
+    ("bg_tex_disorder", "Désordre de l'orientation", 0.0, 1.0, 0.2,
+     dict(kind="color", rand=(0.0, 0.8), tip="Les traits ondulent au lieu d'aller droit")),
+    # variation de la forme
+    ("bg_tex_vary", "Variation selon", 0, len(TEX_FIELDS) - 1, 0,
+     dict(step=1, options=TEX_FIELDS, kind="int", rand=(0, 4), weights=(30, 20, 20, 15, 15),
+          tip="Le champ du relief qui fait varier l'épaisseur des traits")),
+    ("bg_tex_vary_amt", "Force de la variation", -1.0, 1.0, 0.5,
+     dict(kind="color", rand=(-1.0, 1.0))),
+    # couleurs (la palette, la teinte, la saturation et le contraste sont
+    # ceux du groupe Couleur)
+    ("bg_tex_invert", "Inverser les couleurs", 0, 1, 0,
+     dict(step=1, check=True, kind="int", rand=(0, 1))),
+    ("bg_tex_freq", "Fréquence de la palette", 0.5, 4.0, 1.0,
+     dict(law="log", kind="color", rand=(0.5, 2.5),
+          tip="Combien de fois la palette se répète sur le motif")),
+    ("bg_tex_shift", "Décalage dans la palette", 0.0, 1.0, 0.0,
+     dict(law="angle", kind="color", rand=(0.0, 1.0))),
+    ("bg_tex_bright", "Luminosité", 0.2, 2.0, 1.0,
+     dict(law="log", kind="color", rand=(0.7, 1.4))),
+    # style
+    ("bg_tex_metal", "Teinte du métal", -1.0, 1.0, 0.0,
+     dict(kind="color", rand=(-1.0, 1.0), tip="−1 = acier froid … +1 = or chaud")),
+    ("bg_tex_strips", "Reflets : bandes", 0, 8, 3,
+     dict(step=1, kind="int", rand=(0, 6),
+          tip="Bandes de lumière du studio que la surface reflète")),
+    ("bg_tex_strip_sharp", "Reflets : netteté", 0.0, 1.0, 0.6,
+     dict(kind="color", rand=(0.2, 1.0))),
+    ("bg_tex_strip_int", "Reflets : intensité", 0.0, 4.0, 2.0,
+     dict(kind="color", rand=(1.0, 3.0))),
+    ("bg_tex_horizon", "Reflets : ligne d'horizon", 0.0, 2.0, 0.8,
+     dict(kind="color", rand=(0.0, 1.5))),
+    ("bg_tex_strip_orient", "Reflets : orientation", 0.0, 360.0, 0.0,
+     dict(step=1, law="angle", kind="color", rand=(0.0, 360.0))),
+    ("bg_tex_smooth", "Lissage du relief", 0.0, 1.0, 0.7,
+     dict(kind="color", rand=(0.4, 1.0),
+          tip="Gomme le relief fin du terrain : reflets plus nets")),
+    ("bg_tex_emboss", "Gravure", -1.0, 1.0, 0.0,
+     dict(kind="color", rand=(-0.6, 0.6), zero=0.5,
+          tip="Le motif en creux (< 0) ou en relief (> 0) à la lumière ;\n"
+              "0 = texture plate")),
+)
+
 MOV = _group(
     "mov",
     ("bg_mov_speed", "Vitesse", 0.05, 4.0, 1.0,
@@ -543,7 +655,7 @@ SOLID = [
      dict(law="angle", kind="setting", shader=False)),
 )
 
-PARAMS = TOP + _macro_params() + LD + VO + COL + MAT + MOV + COMP + SOLID
+PARAMS = TOP + _macro_params() + LD + VO + COL + MAT + TEX + MOV + COMP + SOLID
 BY_KEY = {p.key: p for p in PARAMS}
 MACRO_KEYS = [f"bg_m_{n}" for n, *_ in MACROS_AMB + MACROS_FORM]
 # groupes qui ont un dé et un cadenas
@@ -648,6 +760,29 @@ AMBIANCES = {
 }
 
 
+# recettes de la texture du relief (T29) : un paysage ci-dessus + un motif
+# et ses réglages (le reste de la texture à son défaut)
+TEX_AMBIANCES = {
+    "Chrome fondu": ("Dunes", {
+        "bg_tex_motif": 1.0, "bg_tex_scale": 4.0, "bg_tex_flow_swirl": 0.8,
+        "bg_tex_shine": 0.95, "bg_tex_metal": -0.4}),
+    "Coulées de métal": ("Canyon érodé", {
+        "bg_tex_motif": 3.0, "bg_tex_scale": 2.5, "bg_tex_density": 2.0,
+        "bg_tex_flow_swirl": 0.2, "bg_tex_metal": 0.6}),
+    "Cartes d'altitude": ("Collines", {
+        "bg_tex_motif": 7.0, "bg_tex_density": 2.5, "bg_tex_width": 0.6,
+        "bg_tex_strip_int": 2.6}),
+    "Ruche chromée": ("Canyon voûté", {
+        "bg_tex_motif": 5.0, "bg_tex_scale": 2.0, "bg_tex_width": 0.75,
+        "bg_tex_shine": 0.9, "bg_tex_metal": 0.3}),
+    "Corail": ("Dunes", {
+        "bg_tex_motif": 2.0, "bg_tex_scale": 2.0, "bg_tex_density": 1.6,
+        "bg_tex_disorder": 0.5, "bg_tex_metal": 0.8, "bg_tex_sharp": 0.85}),
+}
+AMBIANCES.update({name: {**AMBIANCES[base], **tex}
+                  for name, (base, tex) in TEX_AMBIANCES.items()})
+
+
 def defaults() -> dict:
     """Valeurs par défaut de tous les réglages du fond (+ cadenas)."""
     d = {p.key: float(p.default) for p in PARAMS}
@@ -713,6 +848,23 @@ def _check_audio(p: Param) -> list:
     return errors
 
 
+def _check_texture(p: Param) -> list:
+    """La texture du relief est fixe (T29) : ni musique ni macros ; un
+    réglage propre (`only`) vise un menu de la texture et ses valeurs."""
+    errors = []
+    if p.key.startswith("bg_tex_") and p.audio is not None:
+        errors.append("la texture est fixe : pas de musique")
+    if p.key.startswith("bg_tex_") and p.macros:
+        errors.append("la texture est fixe : pas de macros")
+    if p.only is not None:
+        menu = BY_KEY.get(p.only[0])
+        if menu is None or menu.options is None:
+            errors.append(f"only : {p.only[0]} n'est pas un menu")
+        elif any(not menu.lo <= v <= menu.hi for v in p.only[1]):
+            errors.append("only : valeur hors du menu")
+    return errors
+
+
 def validate() -> list:
     """Incohérences de la table (vide = tout va bien) ; vérifié par les tests."""
     errors = []
@@ -721,7 +873,8 @@ def validate() -> list:
     for p in PARAMS:
         if not p.key.startswith("bg_"):
             errors.append(f"{p.key} : la clé doit commencer par bg_")
-        errors += [f"{p.key} : {e}" for e in _check_kind(p) + _check_range(p) + _check_audio(p)]
+        errors += [f"{p.key} : {e}" for e in _check_kind(p) + _check_range(p) + _check_audio(p)
+                   + _check_texture(p)]
     for key in MACRO_KEYS:
         if not any(key[5:] in p.macros for p in PARAMS):
             errors.append(f"{key} : macro sans effet")
@@ -765,3 +918,4 @@ def random_values(seed: int, groups=None, locked=()) -> dict:
             continue
         out[p.key] = _draw(p, random.Random(f"{int(seed)}:{p.key}"))
     return out
+

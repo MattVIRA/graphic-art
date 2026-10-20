@@ -11,6 +11,8 @@ __pycache__/
 *.webp
 *.gif
 *.bmp
+# … sauf les images d'aperçu des motifs du panneau (T29, tools/texture_thumbs.py)
+!gfx/assets/textures/*.png
 
 dev-instructions/
 CLAUDE.md

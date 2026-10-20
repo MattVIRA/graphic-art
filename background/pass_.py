@@ -25,7 +25,8 @@ from background import noise, palettes, quality, schema, temporal, terrain
 log = logging.getLogger(__name__)
 
 SHADER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shaders")
-SHADER_FILES = ["common.glsl", "landscape.glsl", "main.glsl"]   # dans cet ordre
+SHADER_FILES = ["common.glsl", "landscape.glsl", "texture.glsl",   # dans cet ordre
+                "main.glsl"]
 RESOLVE_FILE = "resolve.glsl"            # passe 5 : accumulation + agrandissement
 PALETTE_UNIT, NOISE_UNIT = 3, 6          # 4 et 5 : scène et profondeur (renderer)
 CUR_UNIT, HIST_UNIT, HIST_AUX_UNIT = 7, 8, 9
