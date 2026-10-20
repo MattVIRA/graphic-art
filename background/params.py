@@ -3,12 +3,13 @@
 `BackgroundState.step()` prend les réglages du panneau, les features audio
 lissées et les sources du routing, et rend tout ce que la passe GL envoie
 au shader : macros appliquées, réaction musicale dosée par « Réaction à la
-musique », variation bornée (`slew`), mouvements propres intégrés en dt
-(rotation, défilement, dérive, cycle de teinte), horloge des beats,
-couleurs dérivées et palette. Pour la chaîne d'étages (passe 2), il
-calcule aussi ce qui ne change pas d'un pas de marche à l'autre : rotation
-de pliage KIFS, directions des satellites, portée des formes (bornée à
-leur cellule), étirement dû aux déformations (pas de marche raccourcis).
+musique », variation bornée (`slew`), voyage de l'objet et mouvements
+propres intégrés en dt (rotation, dérive, respiration), horloge des beats,
+couleurs dérivées et palette, et les réglages des cartes de relief
+(`Frame.terrain`, calculées par background/terrain.py). Pour le Volume, il
+calcule ce qui ne change pas d'un pas de marche à l'autre : étirement dû à
+la Distorsion, seuil des cavités (quantile réel du bruit). Le relief est
+fixe : rien dans le paysage ne bouge ni ne change de couleur avec le temps.
 
 Horloge des beats : comptée ici (retour de `beat_phase` à 0) plutôt que dans
 le `Reactor` ; elle ne suit les vrais beats que si la musique a le droit
@@ -21,8 +22,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from background import macros, noise, palettes, temporal
-from background.schema import BREATH_BEATS, MAX_SATELLITES, PARAMS, RESOLUTIONS
+from background import macros, noise, palettes, temporal, terrain
+from background.schema import BREATH_BEATS, PARAMS, RESOLUTIONS
 
 # ordre des sources dans `Routed.bands` (app/routing.py) : 7 bandes EQ,
 # BEAT, KICK, SNARE, ÉNERGIE
@@ -30,23 +31,12 @@ BAND_SOURCES = ("sub", "bass", "lowmid", "mid", "highmid", "presence",
                 "treble", "beat", "kick", "snare", "energy")
 FREE_BPM = 120.0          # horloge des beats sans tempo
 DRIFT_AMP = 0.3           # amplitude de la dérive (unités du fond)
-GROUND = 2                # mode d'Espace « Grille au sol » (voyage à l'horizontale)
-KIFS = 5                  # mode d'Espace « Pliage KIFS »
-PAYSAGE = 2               # monde « Paysage » (voyage à l'horizontale)
-# directions des trois couches du monde de bruit (flux) : chacune glisse
-# dans sa direction, à sa vitesse — rien ne se répète
-FLOW_DIRS = (np.array([0.3, 0.15, 1.0]), np.array([-0.8, 0.4, 0.5]), np.array([0.2, 0.9, -0.4]))
-FLOW_SPEEDS = (0.5, 1.0, 1.7)
-KIFS_AXIS = np.array([1.0, 1.6, 0.7]) / np.linalg.norm([1.0, 1.6, 0.7])
-KIFS_SIZE = 2.0           # taille des formes dans l'espace plié (× Taille)
-SINGLE = 0                # mode d'Espace « Objet seul »
-SINGLE_SIZE = 2.5         # Objet seul : la grande forme fait 2,5 périodes
-ORBIT_AXIS = np.array([0.3, 1.0, 0.2]) / np.linalg.norm([0.3, 1.0, 0.2])
-# portée d'une primitive de « rayon » 1 (voir shape() dans chain.glsl) ;
-# fil de fer et croix y ajoutent l'épaisseur des barres
-PRIM_REACH = (1.0, 1.39, 1.39, 1.39, 0.98, 1.0, 1.0, 1.0, 1.0, 1.0)
-THIN_PRIMS = (3, 8, 9)
-NOISE_GRAD = None         # plus forte pente du bruit 3D, calculée au premier usage
+VALLEY_EDGE = 0.6         # = landscape.glsl : flanc de vallée, extinction de la Distorsion
+# = landscape.glsl : déplacement du warp / (warp × taille) ; à 1, l'air
+# devenait roche au-dessus de la caméra
+WARP_GAIN = 0.3
+BUBBLE_MAX = 0.45         # = landscape.glsl : rayon + écart d'une bulle (cellule = 1)
+NOISE_QUANTILE = 99.0     # pente du bruit 3D retenue pour borner les pas (voir noise)
 AUDIO_PARAMS = [p for p in PARAMS if p.audio is not None]
 SLEW_PARAMS = [p for p in PARAMS if p.max_slew is not None]
 SHADER_PARAMS = [p for p in PARAMS if p.shader]
@@ -73,98 +63,49 @@ def axis_from(azimuth_deg: float, tilt_deg: float) -> np.ndarray:
 
 
 def travel_dir(v: dict) -> np.ndarray:
-    """Direction du voyage (unitaire) ; azimut 0 = vers le fond de l'écran
-    de la vue de départ. En Grille au sol, le voyage reste à l'horizontale."""
-    az, el = math.radians(v["bg_mov_dir_az"]), math.radians(v["bg_mov_dir_el"])
-    if int(v["bg_sp_mode"]) == GROUND and int(v["bg_nw_gen"]) == 0:
-        el = 0.0
-    if int(v["bg_nw_gen"]) == 1 and int(v["bg_nw_mode"]) == PAYSAGE:
-        el = 0.0
-    return np.array([math.sin(az) * math.cos(el), math.sin(el), -math.cos(az) * math.cos(el)])
+    """Direction du voyage (unitaire, toujours à l'horizontale : le sol reste
+    au sol) ; azimut 0 = vers le fond de l'écran de la vue de départ."""
+    az = math.radians(v["bg_mov_dir_az"])
+    return np.array([math.sin(az), 0.0, -math.cos(az)])
+
+
+def volume_stretch(v: dict) -> float:
+    """Étirement maximal dû aux ondes et au warp de la Distorsion (les pas de
+    marche sont divisés d'autant) ; torsion et courbure dépendent du point :
+    le shader les calcule. Les termes en 1/W viennent de l'extinction près
+    du trajet (sur un flanc de vallée)."""
+    S = v["bg_ld_scale"]
+    W = VALLEY_EDGE * S
+    A = v["bg_vo_wave_amp"]
+    # deux ondulations enchaînées : leurs étirements se multiplient
+    ka = 2.0 * math.pi * A / v["bg_vo_wave_len"]
+    edge = 1.5 * A / W
+    wave = (1.0 + ka + edge) * (1.0 + 0.73 * ka + edge)
+    warp = 1.0
+    if v["bg_vo_warp"] > 0.0:
+        octaves = range(int(v["bg_vo_warp_oct"]))
+        amp = 2.0 * WARP_GAIN * v["bg_vo_warp"] * S
+        texels = noise.SIZE / (noise.CELLS * v["bg_vo_warp_size"] * S)   # par unité
+        # pente réaliste du bruit (99e centile), sans le facteur √3 du pire
+        # cas où les trois axes seraient au plus raide ensemble : la borne
+        # stricte divisait les pas par 3, les rayons s'épuisaient
+        slope = noise.gradient_norm(NOISE_QUANTILE) * texels * sum(1.015 ** i for i in octaves)
+        reach = 0.5 * sum(0.5 ** i for i in octaves)       # plus grand |n| par axe
+        warp += amp * (slope + reach * 1.5 / W)
+    return wave * warp
+
+
+def cave_threshold(v: dict) -> float:
+    """Seuil des cavités sur le bruit centré : creusées, la part creusée vaut
+    la moitié de « Cavités » ; roche partout, la roche occupe de 20 à 60 %
+    de l'espace."""
+    if int(v["bg_vo_cave_mode"]) == 0:
+        return noise.centered_quantile(1.0 - 0.5 * v["bg_vo_caves"])
+    return noise.centered_quantile(1.0 - (0.2 + 0.4 * v["bg_vo_caves"]))
 
 
 def lin_hsv(h, s, v) -> tuple:
     return tuple(float(c) for c in palettes.to_linear(palettes.hsv(h, s, v)))
-
-
-def fibonacci_dirs(n: int) -> np.ndarray:
-    """n directions réparties régulièrement sur la sphère (n, 3)."""
-    if n <= 0:
-        return np.zeros((0, 3))
-    i = np.arange(n) + 0.5
-    y = 1.0 - 2.0 * i / n
-    r = np.sqrt(np.maximum(1.0 - y * y, 0.0))
-    a = i * math.pi * (3.0 - math.sqrt(5.0))
-    return np.stack([r * np.cos(a), y, r * np.sin(a)], axis=1)
-
-
-def kifs_rotation(angle_deg: float) -> np.ndarray:
-    """Rotation appliquée à chaque pliage KIFS (axe fixe, angle réglé)."""
-    return rotation(KIFS_AXIS, math.radians(angle_deg))
-
-
-def noise_gradient() -> float:
-    global NOISE_GRAD
-    if NOISE_GRAD is None:
-        NOISE_GRAD = noise.max_gradient(noise.texture())
-    return NOISE_GRAD
-
-
-def shape_reach(v: dict) -> tuple:
-    """Portée d'une instance en fractions de période, avant réduction :
-    (toutes directions, horizontale, verticale). Le shader la borne à la
-    demi-cellule et au couloir du trajet : aucune forme n'est tranchée."""
-    r = v["bg_sh_size"] * (1.0 + 0.4 * v["bg_sp_disorder"]) * (1.0 + 0.5 * v["bg_sh_wave"])
-    prims = (int(v["bg_sh_a"]), int(v["bg_sh_b"]))
-    ext = max(PRIM_REACH[i] for i in prims) * r
-    if any(i in THIN_PRIMS for i in prims):
-        ext += v["bg_sh_thick"]
-    ext += (v["bg_sh_round"] + 0.5 * v["bg_sh_shell"]) * r
-    sx, sy, sz = v["bg_sh_sx"], v["bg_sh_sy"], v["bg_sh_sz"]
-    sy_max = sy * (1.0 + 3.0 * v["bg_sp_eq"]) if int(v["bg_sp_mode"]) == GROUND else sy
-    n = int(v["bg_fu_count"])
-    sat = 0.0
-    if n > 0:
-        sat = (v["bg_fu_spread"] + v["bg_fu_rad"]) * r
-        if int(v["bg_fu_combo"]) == 0:          # l'union douce gonfle un peu
-            sat += 0.5 * v["bg_fu_k"] * r * math.log(n + 1.0)
-        else:                                   # creuser / couper : dans la forme
-            sat = 0.0
-    full = max(ext * max(sx, sy_max, sz), sat)
-    return full, max(ext * max(sx, sz), sat), max(ext * sy_max, sat)
-
-
-def world_constants(v: dict) -> dict:
-    """Monde de bruit : seuil de la roche (quantile réel du bruit pour le
-    Remplissage), pente du bruit par unité (G) et étirement du warp."""
-    g = 16.0 * noise.max_gradient_norm()    # 2 (valeurs centrées) × 8 texels / unité
-    return {
-        "u_nw_thr": noise.centered_quantile(1.0 - v["bg_nw_fill"]),
-        "u_nw_G": g,
-        "u_nw_warpL": v["bg_nw_warp"] * 0.3 * g * math.sqrt(3.0) / v["bg_nw_warp_size"],
-    }
-
-
-def deform_stretch(v: dict) -> float:
-    """Étirement maximal dû aux ondes et au warp (les pas de marche sont
-    divisés d'autant) ; torsion et courbure dépendent du point : le shader
-    les calcule. Le terme en 1/période vient de l'extinction des
-    déformations près du couloir (sur une période)."""
-    P = v["bg_sp_period"]
-    amp = v["bg_dx_wave_amp"] * P
-    # deux ondulations enchaînées (la 2e lit le point déjà déplacé par la
-    # 1re) : leurs étirements se multiplient — les additionner laissait les
-    # rayons sauter par-dessus les surfaces (mouchetures, zébrures)
-    ka = 2.0 * math.pi * amp / v["bg_dx_wave_len"]
-    edge = 1.5 * amp / P                       # pente de l'extinction près du couloir
-    wave = (1.0 + ka + edge) * (1.0 + 0.73 * ka + edge)
-    warp_amp = v["bg_dx_warp_amp"]
-    texels = noise.SIZE * v["bg_dx_warp_freq"] / noise.CELLS     # texels par unité
-    warp = 1.0
-    if warp_amp > 0.0:
-        warp += (2.0 * warp_amp * noise_gradient() * texels * int(v["bg_dx_warp_oct"])
-                 * math.sqrt(3.0) + 1.5 * warp_amp / P)
-    return wave * warp
 
 
 @dataclass
@@ -184,6 +125,7 @@ class Frame:
     same_space: bool          # même espace que le modèle → profondeur partagée
     history: float = 0.0      # poids maximal de l'historique (0 = sans lissage)
     structure: tuple = ()     # change quand le décor change de structure
+    terrain: dict = None      # réglages des cartes de relief (background/terrain.py)
 
 
 class BackgroundState:
@@ -193,12 +135,6 @@ class BackgroundState:
         self.angle = 0.0                           # rotation propre (rad)
         self.travel = np.zeros(3)                  # chemin parcouru par l'objet (unités)
         self.drift = 0.0                           # phase de la dérive
-        self.hue_phase = 0.0                       # cycle de teinte (tours)
-        self.spin = 0.0                            # rotation lente des instances (tours)
-        self.orbit = 0.0                           # orbite des satellites (tours)
-        self.wave_phase = 0.0                      # phase des ondes (tours)
-        self.flow = np.zeros((3, 3))               # glissement des couches du monde
-        self.time = 0.0                            # temps du fond (s), figé par « Gel »
         self.clock = 0.0                           # horloge des beats (beats)
         self.beats = 0
         self._last_phase = None
@@ -247,7 +183,8 @@ class BackgroundState:
         return out
 
     def _advance(self, v: dict, features: dict, dt: float):
-        """Voyage de l'objet, mouvements propres et horloge des beats."""
+        """Voyage de l'objet, mouvements propres et horloge des beats (la
+        respiration du décor la suit)."""
         if v["bg_mov_freeze"] >= 0.5:
             return
         # l'objet avance dans le décor fixe (float64 : des heures de voyage
@@ -257,16 +194,9 @@ class BackgroundState:
         speed = v["bg_mov_speed"]
         if bpm > 0.0:
             speed *= 1.0 + v["bg_mov_sync"] * (bpm / FREE_BPM - 1.0)
-        self.time += dt * speed
         self.angle = (self.angle + 2.0 * math.pi * v["bg_mov_rot"] / 60.0 * speed * dt) \
             % (2.0 * math.pi)
         self.drift += v["bg_mov_drift"] * speed * dt
-        self.hue_phase = (self.hue_phase + v["bg_col_cycle"] / 60.0 * speed * dt) % 1.0
-        self.spin = (self.spin + v["bg_sh_spin"] / 60.0 * speed * dt) % 1.0
-        self.orbit = (self.orbit + v["bg_fu_orbit"] / 60.0 * speed * dt) % 1.0
-        self.wave_phase = (self.wave_phase + v["bg_dx_wave_speed"] * speed * dt) % 1.0
-        for i, (d, k) in enumerate(zip(FLOW_DIRS, FLOW_SPEEDS, strict=True)):
-            self.flow[i] += d / np.linalg.norm(d) * k * v["bg_nw_flow"] * speed * dt
         phase = features.get("beat_phase")
         if v["bg_mov_music"] > 0.0 and bpm > 0.0 and phase is not None:
             if self._last_phase is not None and phase < self._last_phase - 0.5:
@@ -309,11 +239,12 @@ class BackgroundState:
         snare = s["snare"] * dose
         sun = palettes.to_linear(palettes.kelvin(v["bg_light_temp"])) * v["bg_light_int"] \
             * (1.0 + 3.0 * v["bg_light_flash"] * snare)
-        hue = (v["bg_col_hue"] + self.hue_phase
+        # teinte fixe : ni cycle ni teinte musicale (des couleurs qui
+        # glissaient sur le décor, amplifiées par la macro Énergie)
+        hue = (v["bg_col_hue"]
                + palettes.harmony_shift(int(v["bg_col_harmony"]), self.palette_hue,
-                                        model_hue)
-               + v["bg_col_music"] * (s["treble"] - s["bass"]) * 0.25 * dose)
-        eq_gain = min(1.0, 3.0 * dose)
+                                        model_hue))
+        hue_rot = 2.0 * math.pi * (hue % 1.0)
         scale0 = v["bg_comp_scale"]
         scale = scale0 * breath
         # trajet de l'objet dans l'espace des formes : une droite fixe (la
@@ -330,13 +261,7 @@ class BackgroundState:
         # le faisait aller et venir d'autant plus que l'objet avait voyagé
         # (±6 unités au tempo après 5 min)
         offset = (offset + drift) * breath
-        n_sat = min(int(v["bg_fu_count"]), MAX_SATELLITES)
-        sats = np.zeros((MAX_SATELLITES, 3), dtype="f4")
-        if n_sat:
-            sats[:n_sat] = fibonacci_dirs(n_sat) @ rotation(ORBIT_AXIS,
-                                                            2.0 * math.pi * self.orbit).T
-        reach, reach_h, reach_v = shape_reach(v)
-        fs = v["bg_sp_fscale"]
+        sky = lin_hsv(v["bg_light_sky_hue"], 0.45, 1.0)
         return {
             "u_path_o": tuple(path_o),
             "u_path_m": tuple(path_m.T.flatten()),        # colonne-major pour GL
@@ -344,15 +269,14 @@ class BackgroundState:
             "u_offset": tuple(offset),
             "u_scale": scale,
             "u_detail": self._detail(v),
-            "u_beat": self.clock,
-            "u_time": self.time,
             "u_sun_dir": sun_dir,
             "u_sun_col": tuple(float(c) for c in sun),
-            "u_sky_col": tuple(c * v["bg_light_sky"]
-                               for c in lin_hsv(v["bg_light_sky_hue"], 0.45, 1.0)),
+            # ciel et brume accordés à la palette (même dosage)
+            "u_sky_col": tuple(float(c) * v["bg_light_sky"] for c in palettes.fog_color(
+                sky, self.palette, v["bg_comp_fog_tint"], hue_rot)),
             "u_hor_col": tuple(float(c) for c in palettes.fog_color(
                 lin_hsv(v["bg_col_hor_hue"], 0.6, v["bg_col_hor_lum"]), self.palette,
-                v["bg_comp_fog_tint"], 2.0 * math.pi * (hue % 1.0))),
+                v["bg_comp_fog_tint"], hue_rot)),
             "u_shadow_col": tuple(c * v["bg_col_shadow"]
                                   for c in lin_hsv(v["bg_col_shadow_hue"], 0.8, 1.0)),
             "u_emit_col": tuple(c * v["bg_col_emit"]
@@ -362,47 +286,19 @@ class BackgroundState:
                                   for c in lin_hsv(model_hue, 0.75, 1.0)),
             "u_flash": v["bg_col_flash"] * snare,
             "u_tint": tuple(float(c) for c in palettes.tint(v["bg_col_tint"])),
-            "u_hue_rot": 2.0 * math.pi * (hue % 1.0),
-            "u_eq": np.array([s[b] * eq_gain for b in BAND_SOURCES[:7]], dtype="f4"),
+            "u_hue_rot": hue_rot,
             "u_edges": v["bg_mat_edges"],
-            "u_kifs_rot": tuple(kifs_rotation(v["bg_sp_angle"]).T.flatten()),
-            "u_kifs_off": tuple(np.array([v["bg_sp_off_x"], v["bg_sp_off_y"],
-                                          v["bg_sp_off_z"]]) * (fs - 1.0)),
-            "u_kifs_inv": 1.0 / fs ** int(v["bg_sp_iter"]),
-            "u_sat": sats.flatten(),
-            "u_reach": reach,
-            "u_reach_h": reach_h,
-            "u_reach_v": reach_v,
-            "u_dx_lip": deform_stretch(v),
-            "u_dx_phase": 2.0 * math.pi * self.wave_phase,
-            "u_sh_angle": math.radians(v["bg_sh_rot"]) + 2.0 * math.pi * self.spin,
-            "u_nw_flow1": tuple(self.flow[0]),
-            "u_nw_flow2": tuple(self.flow[1]),
-            "u_nw_flow3": tuple(self.flow[2]),
-            **world_constants(v),
+            "u_vo_lip": volume_stretch(v),
+            "u_vo_cave_thr": cave_threshold(v),
+            # 2 (centré) × 8 texels / unité
+            "u_vo_G": 16.0 * noise.gradient_norm(NOISE_QUANTILE),
         }
 
     @staticmethod
     def _detail(v: dict) -> float:
-        """Plus petit détail des formes (unités du fond) : en dessous de ~2
+        """Plus petit détail visible (unités du fond) : en dessous de ~2
         pixels il se fond dans la brume au lieu de scintiller."""
-        if int(v["bg_nw_gen"]) == 1:          # monde de bruit : la couche moyenne
-            return max(v["bg_nw_scale"] * 0.3 * 0.5, 1e-3) * v["bg_comp_scale"]
-        P = v["bg_sp_period"]
-        if int(v["bg_sp_mode"]) == SINGLE:
-            P *= SINGLE_SIZE
-        r = v["bg_sh_size"] * P
-        prims = (int(v["bg_sh_a"]), int(v["bg_sh_b"]))
-        size = 0.5 * r
-        if any(i in THIN_PRIMS for i in prims):
-            size = min(size, v["bg_sh_thick"] * P)
-        if 4 in prims:
-            size = min(size, 0.28 * r)
-        if int(v["bg_fu_count"]) > 0:
-            size = min(size, v["bg_fu_rad"] * r)
-        if int(v["bg_sp_mode"]) == KIFS:     # copies réduites à chaque pliage
-            size *= KIFS_SIZE / v["bg_sp_fscale"] ** int(v["bg_sp_iter"])
-        return max(size, 1e-3) * v["bg_comp_scale"]
+        return v["bg_ld_scale"] * 0.15 * v["bg_comp_scale"]
 
     def step(self, p: dict, features: dict, bands, dt: float,
              model_hue: float = 0.0) -> Frame:
@@ -429,6 +325,7 @@ class BackgroundState:
             light_model=int(v["bg_light_mode"]) == 0,
             light_int=v["bg_light_int"] / 1.5,
             same_space=v["bg_comp_far"] < 1e-3,
-            history=temporal.max_weight(v["bg_temporal"], temporal.animation(v)),
+            history=temporal.max_weight(v["bg_temporal"]),
             structure=tuple(round(v[k], 3) for k in STRUCTURE_KEYS),
+            terrain={k: v[k] for k in terrain.SETTINGS},
         )

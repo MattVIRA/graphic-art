@@ -1,9 +1,12 @@
 """Brique « fond » de l'application (T16) : l'état du fond (sans GL), la
-passe GL et la résolution automatique, reliés au renderer.
+passe GL, le calcul du relief et la résolution automatique, reliés au
+renderer.
 
 Les shaders sont compilés au démarrage ; s'ils sont illisibles, le fond est
 désactivé (message) et l'appli continue. Un .glsl modifié pendant que
 l'appli tourne est recompilé ; s'il ne compile pas, l'ancien reste affiché.
+Les cartes du relief sont calculées dans un thread : le paysage affiché
+reste en place jusqu'à ce que le nouveau soit prêt.
 """
 
 import logging
@@ -14,6 +17,7 @@ from background import quality
 from background.params import BackgroundState
 from background.pass_ import BackgroundPass
 from background.schema import RESOLUTIONS
+from background.terrain import TerrainBuilder
 
 log = logging.getLogger(__name__)
 
@@ -21,10 +25,12 @@ RELOAD_PERIOD_S = 1.0   # vérification des .glsl modifiés
 
 
 class Decor:
-    def __init__(self, ctx: moderngl.Context, report):
+    def __init__(self, ctx: moderngl.Context, report, sync_terrain: bool = False):
+        """sync_terrain : relief calculé tout de suite (banc de rendu)."""
         self.report = report
         self.state = BackgroundState()
         self.auto = quality.AutoResolution()
+        self.terrain = TerrainBuilder(report, sync=sync_terrain)
         self.res_index = None          # résolution effective (Auto peut la baisser)
         self._next_reload = 0.0
         try:
@@ -64,6 +70,10 @@ class Decor:
         f = self.state.step(p, features, bands, dt, model_hue=p.get("rim_hue", 0.0))
         renderer.bg = f.solid
         self._reload(now)
+        self.terrain.request(f.terrain)
+        maps = self.terrain.take()
+        if maps is not None:
+            self.gl.set_terrain(maps)
         self.res_index = self.auto.step(f.res_index, f.quality == quality.AUTO,
                                         self.gl.gpu_ms, dt)
         renderer.set_background(self.gl, f, view, RESOLUTIONS[self.res_index][1], unit)

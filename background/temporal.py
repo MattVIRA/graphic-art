@@ -15,9 +15,8 @@ Ce module contient ce que le shader de résolution applique, écrit ici pour
   point touché cette frame est ramené là où il était la frame d'avant ;
 - les règles de rejet de l'historique (surface disparue du voisinage,
   couleur écrêtée) et le mélange pondéré (`accumulate`) ;
-- le poids maximal de l'historique selon « Lissage temporel » et
-  l'animation du décor (ce qui bouge sans être reprojeté : rotation lente
-  des formes, orbite, ondes, flux des mondes) ;
+- le poids maximal de l'historique selon « Lissage temporel » (le
+  relief est fixe : tout ce qui bouge est reprojeté) ;
 - `History` : la pose de la frame précédente et les remises à zéro.
 """
 
@@ -27,7 +26,6 @@ import numpy as np
 
 CYCLE = 16                 # décalages de Halton avant de reboucler
 MAX_HISTORY = 32.0         # poids maximal de l'historique (frames)
-MIN_HISTORY = 3.0          # plancher quand le décor s'anime beaucoup
 NO_HIT = 60000.0           # profondeur « rien touché » (main.glsl)
 MASKED = -1.0              # pixel arrêté par le modèle : pas du décor
 HISTORY_RATIO = 1.5        # résolution de l'historique / résolution du fond
@@ -62,34 +60,13 @@ def history_size(bg_size, out_size) -> tuple:
 
 
 # ── poids maximal de l'historique ─────────────────────────────────────
-def animation(v: dict) -> float:
-    """Vitesse de ce qui bouge dans le décor sans être reprojeté (environ
-    en « détails renouvelés par seconde ») : la reprojection suit le voyage,
-    la dérive, la respiration et la rotation du décor, pas les formes qui
-    tournent sur elles-mêmes, les satellites, les ondes ni le flux."""
-    if v["bg_mov_freeze"] >= 0.5:
-        return 0.0
-    a = abs(v["bg_sh_spin"]) * 4.0                      # tours/min
-    if v["bg_fu_count"] >= 1:
-        a += v["bg_fu_orbit"] * 4.0                     # tours/min
-    if v["bg_dx_wave_amp"] > 0.0:
-        a += v["bg_dx_wave_speed"] * 10.0 * min(v["bg_dx_wave_amp"] * 4.0, 1.0)
-    if v["bg_nw_gen"] >= 0.5:
-        a += v["bg_nw_flow"] * 2.0                      # unités/s
-    if v["bg_sh_wave"] > 0.0 or v["bg_mat_chase"] > 0.0:
-        a += 0.5                                        # au tempo
-    return a * v["bg_mov_speed"]
-
-
-def max_weight(smoothing: float, anim: float = 0.0) -> float:
+def max_weight(smoothing: float) -> float:
     """Poids maximal de l'historique (≈ nombre de frames mélangées) ;
-    0 = pas d'historique (ni décalage). Un décor qui s'anime en garde moins :
-    le reprojeter le traînerait."""
+    0 = pas d'historique (ni décalage)."""
     s = min(max(float(smoothing), 0.0), 1.0)
     if s <= 0.0:
         return 0.0
-    w = 1.0 + (MAX_HISTORY - 1.0) * s * s
-    return max(w / (1.0 + max(anim, 0.0)), min(w, MIN_HISTORY))
+    return 1.0 + (MAX_HISTORY - 1.0) * s * s
 
 
 # ── règles de rejet et mélange (mêmes formules que resolve.glsl) ──────

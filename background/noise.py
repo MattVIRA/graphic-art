@@ -1,11 +1,10 @@
-"""Bruit 3D du fond (T16, passe 2), sans GL.
+"""Bruit 3D du fond (T16), sans GL.
 
-Le warp de la Distorsion lit ce bruit dans une texture 3D au lieu de le
-calculer à chaque pas de marche (mesuré : un bruit calculé coûtait ×8 à
-×13 le treillis). Bruit blanc filtré dans le domaine de Fourier : il est
-lisse, et périodique par construction (la texture se répète sans couture
-en mode REPEAT). Trois canaux indépendants : un déplacement par axe pour
-le warp, trois couches pour les mondes de bruit (passe 4).
+La matière du paysage (nappes de couleur, grain, relief de surface,
+veines) et le Volume (warp de la Distorsion, cavités) lisent ce bruit dans
+une texture 3D au lieu de le calculer dans le shader. Bruit blanc filtré
+dans le domaine de Fourier : il est lisse, et périodique par construction (la texture se répète sans
+couture en mode REPEAT). Trois canaux indépendants.
 """
 
 from functools import lru_cache
@@ -37,25 +36,18 @@ def texture(size: int = SIZE, cells: int = CELLS, seed: int = SEED) -> np.ndarra
     return out
 
 
-def max_gradient(tex: np.ndarray) -> float:
-    """Plus forte variation d'un texel au voisin (tous axes et canaux,
-    raccord compris) : sert à borner l'étirement du warp."""
-    g = 0.0
-    for axis in range(3):
-        g = max(g, float(np.abs(np.roll(tex, -1, axis=axis) - tex).max()))
-    return g
-
-
-@lru_cache(maxsize=1)
-def max_gradient_norm() -> float:
-    """Plus forte pente (norme du gradient, par texel) d'un canal de la
-    texture, raccord compris : un champ de bruit n'est pas une distance, le
-    shader divise sa valeur par cette pente pour ne jamais sauter une paroi."""
+@lru_cache(maxsize=4)
+def gradient_norm(quantile: float = 100.0) -> float:
+    """Pente (norme du gradient, par texel) d'un canal de la texture, raccord
+    compris, au quantile donné (100 = la plus forte) : un champ de bruit
+    n'est pas une distance, le shader divise sa valeur par cette pente. Le
+    99e centile (1,5 fois moins que le maximum) suffit en pratique : avec le
+    maximum, les rayons épuisaient leurs pas dans les volumes déformés."""
     tex = texture().astype(np.float64)
     g2 = np.zeros(tex.shape)
     for axis in range(3):
         g2 += ((np.roll(tex, -1, axis=axis) - np.roll(tex, 1, axis=axis)) * 0.5) ** 2
-    return float(np.sqrt(g2).max())
+    return float(np.percentile(np.sqrt(g2), quantile))
 
 
 @lru_cache(maxsize=1)
@@ -64,8 +56,8 @@ def _sorted_centered() -> np.ndarray:
 
 
 def centered_quantile(q: float) -> float:
-    """Quantile de la couche de fond centrée (valeurs 2·(n − 0,5)) : le seuil
-    qui laisse la part `1 − q` de l'espace au-dessus (la roche)."""
+    """Quantile du canal 0 centré (valeurs 2·(n − 0,5)) : le seuil qui laisse
+    la part `1 − q` de l'espace au-dessus (cavités, roche)."""
     values = _sorted_centered()
     i = int(round(min(max(q, 0.0), 1.0) * (values.size - 1)))
     return float(values[i])

@@ -15,7 +15,9 @@ Classes (`kind`) — ce que la musique et les macros ont le droit de faire :
 - `int` : saute d'une valeur entière à l'autre, ne glisse pas ;
 - `color` / `emissive` : ne touchent pas la géométrie ;
 - `phase` : une vitesse, intégrée en dt ; la musique la multiplie ;
-- `setting` : réglage de l'utilisateur, ni musique ni dé.
+- `setting` : réglage de l'utilisateur, ni musique ni dé ;
+- `terrain` : dans les cartes de hauteur précalculées (background/terrain.py) :
+  le changer relance le calcul ; ni musique ni glissement, pas d'uniform.
 """
 
 import math
@@ -23,7 +25,7 @@ import random
 from dataclasses import dataclass, field
 
 KINDS = ("exact", "deform", "topology", "int", "color", "emissive", "phase",
-         "setting")
+         "setting", "terrain")
 # sources de la réaction musicale : 7 bandes EQ, puis la couche percussive
 AUDIO_SOURCES = ("sub", "bass", "lowmid", "mid", "highmid", "presence",
                  "treble", "beat", "kick", "snare", "energy", "rms")
@@ -40,12 +42,9 @@ RESOLUTIONS = [("¼", 0.25), ("⅓", 1.0 / 3.0), ("½", 0.5), ("¾", 0.75), ("1"
 GROUPS = [
     ("top", "Fond"),
     ("macro_amb", "Macros d'ambiance"),
-    ("macro_form", "Macros de forme"),
-    ("nw", "Générateur et monde de bruit"),
-    ("sp", "Espace"),
-    ("dx", "Distorsion"),
-    ("sh", "Formes"),
-    ("fu", "Fusion"),
+    ("macro_form", "Macros du paysage"),
+    ("ld", "Paysage"),
+    ("vo", "Volume : distorsion, cavités, bulles"),
     ("col", "Couleur"),
     ("mat", "Matière et lumière"),
     ("mov", "Mouvement"),
@@ -59,20 +58,18 @@ MACROS_AMB = [
     ("glow", "Éclat", "mat → néon"),
     ("daylight", "Nuit ↔ Jour", "sombre → lumineux"),
     ("depth", "Profondeur", "proche, serré → lointain, abyssal"),
-    ("tension", "Tension", "les formes collent au modèle → s'en écartent"),
+    ("tension", "Tension", "vallée étroite → large"),
     ("fluid", "Fluidité", "raide → liquide"),
     ("symmetry", "Symétrie", "libre → ordonné"),
     ("strange", "Étrangeté", "réaliste → onirique"),
     ("contrast", "Contraste", "doux → dur"),
 ]
 MACROS_FORM = [
-    ("complexity", "Complexité", "simple → chargé"),
-    ("chaos", "Chaos", "régulier → désordonné"),
-    ("density", "Densité", "aéré → serré"),
-    ("organic", "Organique ↔ Géométrique", "arrondi → anguleux"),
+    ("complexity", "Complexité", "lisse → détaillé (couches)"),
+    ("chaos", "Chaos", "régulier → tourmenté (déformation)"),
     ("scale", "Échelle", "micro → macro"),
-    ("fill", "Vide ↔ Plein", "ajouré → massif"),
-    ("crystal", "Cristal ↔ Chair", "arêtes vives → matière douce"),
+    ("relief", "Relief", "plaine → montagnes à crêtes"),
+    ("hollow", "Cavités", "plein → creusé (grottes, bulles)"),
 ]
 
 
@@ -154,212 +151,119 @@ TOP = [
               "pixel à chaque frame) : contours nets, plus d'escaliers ni de\n"
               "zébrures au loin. 0 = chaque frame seule"),
     Param("bg_seed", "Seed", "top", 0, 9999, 0, step=1, kind="setting",
-          shader=False, tip="Numéro du dernier tirage « 🎲 Nouvelle forme »"),
+          shader=False, tip="Numéro du dernier tirage « 🎲 Nouveau paysage »"),
 ]
 
-# ── chaîne d'étages (passe 2) : Espace → Distorsion → Formes → Fusion ──
-SPACE_MODES = ("Objet seul", "Grille 3D", "Grille au sol",
-               "Anneaux le long du trajet", "Miroirs", "Pliage KIFS")
-PRIMITIVES = ("Sphère", "Boîte", "Boîte arrondie", "Boîte en fil de fer", "Tore",
-              "Octaèdre", "Capsule", "Cylindre", "Croix (3 barres)", "Gyroïde (coque)")
-COMBINATIONS = ("Union douce", "Creusement doux", "Intersection douce")
-DEFORM_AXES = ("Le long du trajet", "Vertical")
-MAX_SATELLITES = 8
-MAX_FOLDS = 8
-
-# ── monde de bruit (passe 4) : un monde continu en couches de bruit ──
-GENERATORS = ("Formes répétées", "Monde de bruit")
-WORLD_MODES = ("Caverne", "Nappes liquides", "Paysage")
-
-NW = _group(
-    "nw",
-    ("bg_nw_gen", "Générateur", 0, len(GENERATORS) - 1, 0,
-     dict(step=1, options=GENERATORS, kind="int", rand=(0, 1), weights=(45, 55),
-          tip="Formes répétées : la chaîne Espace → Distorsion → Formes → Fusion.\n"
-              "Monde de bruit : un monde continu (caverne, nappes, paysage) fait de\n"
-              "couches de bruit ; la Distorsion s'y applique aussi")),
-    ("bg_nw_mode", "Monde", 0, len(WORLD_MODES) - 1, 0,
-     dict(step=1, options=WORLD_MODES, kind="int", rand=(0, 2), weights=(45, 35, 20))),
-    ("bg_nw_scale", "Taille du monde", 4.0, 60.0, 16.0,
-     dict(step=0.5, law="log", kind="topology", rand=(8.0, 35.0),
-          macros={"density": -0.4, "scale": 0.6},
-          tip="Taille des grandes formes du monde (unités du fond)")),
-    ("bg_nw_fill", "Remplissage", 0.2, 0.8, 0.5,
-     dict(kind="topology", rand=(0.3, 0.65), macros={"fill": 0.15}, shader=False,
-          tip="Caverne : part de l'espace occupée par la roche")),
-    ("bg_nw_breath", "Respiration", 0.0, 0.3, 0.05,
-     dict(step=0.005, rand=(0.0, 0.15),
-          tip="Les parois gonflent et dégonflent lentement")),
-    ("bg_nw_warp", "Déformation", 0.0, 2.0, 0.6,
-     dict(kind="deform", rand=(0.2, 1.6), macros={"chaos": 0.6, "fluid": 0.4},
-          tip="Le bruit déforme le bruit : formes liquides, organiques")),
-    ("bg_nw_warp_size", "Taille de la déformation", 0.3, 2.0, 0.8,
-     dict(kind="deform", rand=(0.4, 1.5), tip="En tailles du monde")),
-    ("bg_nw_detail", "Couche moyenne", 0.0, 1.0, 0.35,
-     dict(kind="deform", rand=(0.0, 0.7), macros={"complexity": 0.3},
-          tip="Formes trois fois plus petites ajoutées au monde")),
-    ("bg_nw_fine", "Couche fine", 0.0, 0.5, 0.1,
-     dict(kind="deform", rand=(0.0, 0.3), zero=0.3, macros={"complexity": 0.15},
-          tip="Détail fin (s'efface au loin : pas de grain)")),
-    ("bg_nw_flow", "Flux (unités/s)", 0.0, 1.0, 0.12,
-     dict(kind="phase", rand=(0.02, 0.4), audio=("energy", 0.4),
-          macros={"energy": 0.15}, shader=False,
-          tip="Les couches glissent lentement, chacune dans sa direction")),
-    ("bg_nw_thick", "Épaisseur des nappes", 0.02, 0.5, 0.12,
-     dict(rand=(0.04, 0.3), macros={"fill": 0.08})),
-    ("bg_nw_gyroid", "Gyroïde dans les nappes", 0.0, 1.0, 0.4,
-     dict(kind="deform", rand=(0.0, 0.9), macros={"symmetry": 0.4},
-          tip="Mêle aux nappes un gyroïde (surface minimale) : plus ordonné")),
-    ("bg_nw_relief", "Hauteur du relief (Paysage)", 0.2, 4.0, 1.5,
-     dict(kind="topology", rand=(0.6, 3.0), tip="En tailles du monde × 0,3")),
-    ("bg_nw_vault", "Voûte (Paysage)", 0, 1, 0,
-     dict(step=1, check=True, kind="int", rand=(0, 1), tip="Un plafond : canyon")),
-    ("bg_nw_soft", "Douceur du tunnel", 0.0, 1.0, 0.5,
-     dict(rand=(0.2, 0.9),
-          tip="Le couloir du trajet est creusé dans le monde ; 1 = bords très doux")),
+# ── paysage (passe finale) : le seul générateur ──────────────────────
+# Les réglages de classe `terrain` sont dans les cartes de hauteur
+# précalculées (background/terrain.py) : les changer relance le calcul
+# (≈ 0,4 s, en arrière-plan), ils ne glissent pas et la musique n'y touche pas.
+LD = _group(
+    "ld",
+    ("bg_ld_seed", "Graine du relief", 0, 9999, 0,
+     dict(step=1, kind="terrain", rand=(0, 9999), shader=False,
+          tip="Un autre tirage du même genre de relief")),
+    ("bg_ld_scale", "Taille du monde", 4.0, 60.0, 20.0,
+     dict(step=0.5, law="log", kind="topology", rand=(10.0, 35.0),
+          macros={"scale": 0.6},
+          tip="Taille des grandes formes du relief (unités du fond ; le modèle a\n"
+              "un rayon de 1). Ne recalcule rien")),
+    ("bg_ld_relief", "Hauteur du relief", 0.2, 5.0, 2.0,
+     dict(law="log", kind="topology", rand=(0.8, 4.0), macros={"relief": 0.7},
+          tip="En tailles du monde × 0,1 : 1 = collines, 4 = montagnes.\n"
+              "Ne recalcule rien")),
+    ("bg_ld_octaves", "Couches (octaves)", 1, 10, 6,
+     dict(step=1, kind="terrain", rand=(4, 9), macros={"complexity": 3.0},
+          shader=False,
+          tip="Chaque couche ajoute un relief plus fin (texture). Les couches\n"
+              "plus fines qu'≈ 1/128 de la taille du monde sont laissées au\n"
+              "relief de surface (onglet Matière)")),
+    ("bg_ld_rough", "Rugosité", 0.3, 0.7, 0.5,
+     dict(kind="terrain", rand=(0.38, 0.6), shader=False,
+          tip="Part de chaque couche dans la suivante : haut = relief accidenté")),
+    ("bg_ld_lacun", "Lacunarité", 1.6, 3.0, 2.0,
+     dict(kind="terrain", rand=(1.8, 2.5), shader=False,
+          tip="Finesse d'une couche à la suivante : haut = détail très fin vite")),
+    ("bg_ld_ridges", "Crêtes", 0.0, 1.0, 0.3,
+     dict(kind="terrain", rand=(0.0, 1.0), macros={"relief": 0.4}, shader=False,
+          tip="Montagnes à arêtes vives")),
+    ("bg_ld_erosion", "Érosion", 0.0, 1.0, 0.4,
+     dict(kind="terrain", rand=(0.0, 0.9), macros={"fluid": 0.3}, shader=False,
+          tip="Pentes et fonds de vallée lisses, sommets détaillés")),
+    ("bg_ld_warp", "Déformation", 0.0, 2.0, 0.6,
+     dict(kind="terrain", rand=(0.1, 1.5), macros={"chaos": 0.8, "fluid": 0.4},
+          shader=False, tip="Le bruit déforme le relief : formes liquides, vallées sinueuses")),
+    ("bg_ld_warp_size", "Taille de la déformation", 0.3, 2.0, 0.8,
+     dict(kind="terrain", rand=(0.4, 1.5), shader=False, tip="En tailles du monde")),
+    ("bg_ld_terrace", "Terrasses", 0.0, 1.0, 0.0,
+     dict(kind="terrain", rand=(0.0, 0.8), zero=0.6, macros={"symmetry": 0.4},
+          shader=False, tip="Strates : plateaux en gradins")),
+    ("bg_ld_terrace_n", "Nombre de terrasses", 2, 16, 6,
+     dict(step=1, kind="terrain", rand=(3, 10), shader=False)),
+    ("bg_ld_valley", "Largeur de la vallée", 1.5, 30.0, 6.0,
+     dict(step=0.1, rand=(3.0, 12.0), macros={"tension": 3.0},
+          tip="Demi-largeur du fond plat de la vallée où voyage l'objet (unités)")),
+    ("bg_ld_vault", "Voûte (canyon)", 0, 1, 0,
+     dict(step=1, check=True, kind="int", rand=(0, 1), weights=(75, 25),
+          tip="Un plafond rocheux au-dessus de la vallée")),
 )
 
-SP = _group(
-    "sp",
-    ("bg_sp_mode", "Mode", 0, len(SPACE_MODES) - 1, 1,
-     dict(step=1, options=SPACE_MODES, kind="int", rand=(0, 5),
-          weights=(10, 25, 15, 20, 15, 15),
-          tip="Comment le monde se répète autour du trajet de l'objet")),
-    ("bg_sp_period", "Période", 2.0, 16.0, 6.0,
-     dict(step=0.1, law="log", kind="topology", rand=(3.0, 11.0),
-          macros={"density": -0.5, "scale": 0.6},
-          tip="Taille d'une cellule (unités du fond ; le modèle a un rayon de 1).\n"
-              "Objet seul : la grande forme fait 2,5 périodes ; KIFS : taille du motif")),
-    ("bg_sp_along", "Période le long du trajet", 2.0, 16.0, 6.0,
-     dict(step=0.1, kind="topology", rand=(3.0, 12.0),
-          tip="Anneaux : écart entre deux anneaux ; Miroirs, KIFS : longueur du motif\n"
-              "répété en miroir ; Objet seul : une forme tous les 2 × cette période")),
-    ("bg_sp_count", "Instances par anneau", 3, 24, 8,
-     dict(step=1, kind="int", rand=(3, 14))),
-    ("bg_sp_dist", "Écart au couloir (Objet seul)", 0.0, 30.0, 3.0,
-     dict(step=0.5, rand=(0.0, 12.0),
-          tip="Distance entre le couloir du trajet et la grande forme")),
-    ("bg_sp_iter", "Itérations de pliage (KIFS)", 1, MAX_FOLDS, 4,
-     dict(step=1, kind="int", rand=(2, 6), macros={"complexity": 3})),
-    ("bg_sp_angle", "Angle de pliage", 0.0, 90.0, 20.0,
-     dict(step=0.5, rand=(0.0, 60.0), slew=0.05, shader=False,
-          macros={"chaos": 25.0},
-          tip="Rotation à chaque pliage (KIFS) ; varie lentement")),
-    ("bg_sp_fscale", "Échelle de pliage", 1.2, 3.0, 2.0,
-     dict(kind="topology", rand=(1.4, 2.6))),
-    ("bg_sp_off_x", "Décalage de pliage x", 0.0, 2.0, 1.0,
-     dict(rand=(0.2, 1.5), shader=False)),
-    ("bg_sp_off_y", "Décalage de pliage y", 0.0, 2.0, 1.0,
-     dict(rand=(0.2, 1.5), shader=False)),
-    ("bg_sp_off_z", "Décalage de pliage z", 0.0, 2.0, 1.0,
-     dict(rand=(0.0, 1.5), shader=False)),
-    ("bg_sp_mirror_x", "Miroir X (en travers)", 0, 1, 1,
-     dict(step=1, check=True, kind="int", rand=(0, 1))),
-    ("bg_sp_mirror_y", "Miroir Y (haut / bas)", 0, 1, 0,
-     dict(step=1, check=True, kind="int", rand=(0, 1))),
-    ("bg_sp_mirror_z", "Miroir Z (le long du trajet)", 0, 1, 0,
-     dict(step=1, check=True, kind="int", rand=(0, 1))),
-    ("bg_sp_disorder", "Désordre par instance", 0.0, 1.0, 0.0,
-     dict(rand=(0.0, 0.8), zero=0.5, macros={"chaos": 0.45, "symmetry": -0.3},
-          tip="Rotation et taille propres à chaque instance\n"
-              "(0 = instances identiques : rendu plus net et plus rapide)")),
-    ("bg_sp_missing", "Instances manquantes", 0.0, 0.8, 0.0,
-     dict(kind="topology", rand=(0.0, 0.5), zero=0.4, macros={"fill": -0.35})),
-    ("bg_sp_eq", "Hauteur ← EQ (Grille au sol)", 0.0, 1.0, 0.0,
-     dict(rand=(0.0, 0.8), zero=0.5,
-          tip="Égaliseur 3D : une bande EQ par rangée étire les formes vers le haut")),
-)
+# ── volume (passe finale, 2e temps) : ce qu'un champ de hauteur ne fait pas ──
+# La Distorsion déforme l'espace avant le relief (surplombs, espace tordu),
+# les cavités et les bulles creusent ou ajoutent de la matière en 3D. Tout
+# s'éteint près du trajet de l'objet (couloir libre), sauf la torsion autour
+# du trajet, qui le laisse en place.
+CAVE_MODES = ("Creusées dans le relief", "Roche dans tout l'espace")
+BUBBLE_MODES = ("Creusées", "Pleines", "Les deux")
 
-DX = _group(
-    "dx",
-    ("bg_dx_twist", "Torsion (tours par unité)", 0.0, 0.05, 0.0,
-     dict(step=0.001, kind="deform", rand=(0.0, 0.03), zero=0.5,
-          tip="Le monde tourne autour de l'axe des déformations en avançant")),
-    ("bg_dx_bend", "Courbure", -0.05, 0.05, 0.0,
-     dict(step=0.001, kind="deform", rand=(-0.03, 0.03), zero=0.5,
-          tip="Les rangées se courbent en s'éloignant du trajet")),
-    ("bg_dx_wave_amp", "Ondes : amplitude", 0.0, 0.5, 0.0,
-     dict(step=0.005, kind="deform", rand=(0.0, 0.3), zero=0.5,
-          audio=("bass", 0.1),
-          tip="Fraction de la période")),
-    ("bg_dx_wave_len", "Ondes : longueur", 1.0, 20.0, 8.0,
-     dict(step=0.1, kind="deform", rand=(4.0, 16.0), tip="Unités du fond")),
-    ("bg_dx_wave_speed", "Ondes : vitesse", 0.0, 0.2, 0.02,
-     dict(step=0.005, kind="phase", rand=(0.0, 0.1),
-          shader=False, tip="Tours par seconde : les ondes glissent lentement")),
-    ("bg_dx_warp_amp", "Warp : amplitude", 0.0, 3.0, 0.0,
-     dict(step=0.01, kind="deform", rand=(0.0, 2.0), zero=0.5,
-          macros={"chaos": 1.0},
-          tip="Bruit 3D (texture) qui déplace l'espace (unités du fond)")),
-    ("bg_dx_warp_freq", "Warp : fréquence", 0.03, 0.5, 0.15,
-     dict(step=0.005, law="log", kind="deform", rand=(0.05, 0.3),
-          tip="Nombre de bosses par unité")),
-    ("bg_dx_warp_oct", "Warp : octaves", 1, 3, 1,
-     dict(step=1, kind="int", rand=(1, 3), macros={"complexity": 1.5})),
-    ("bg_dx_axis", "Axe des déformations", 0, len(DEFORM_AXES) - 1, 0,
-     dict(step=1, options=DEFORM_AXES, kind="int", rand=(0, 1),
-          weights=(70, 30))),
-)
-
-SH = _group(
-    "sh",
-    ("bg_sh_a", "Primitive A", 0, len(PRIMITIVES) - 1, 3,
-     dict(step=1, options=PRIMITIVES, kind="int", rand=(0, 9))),
-    ("bg_sh_b", "Primitive B", 0, len(PRIMITIVES) - 1, 5,
-     dict(step=1, options=PRIMITIVES, kind="int", rand=(0, 9))),
-    ("bg_sh_morph", "Morphing A → B", 0.0, 1.0, 0.0,
-     dict(rand=(0.0, 1.0), zero=0.35, audio=("energy", 0.3),
-          tip="Mélange des deux distances : passage continu, sans trou")),
-    ("bg_sh_size", "Taille", 0.05, 0.45, 0.2,
-     dict(step=0.005, rand=(0.12, 0.4), macros={"density": 0.1, "fill": 0.1},
-          tip="Fraction de la période (réduite si la forme déborderait de sa cellule)")),
-    ("bg_sh_sx", "Étirement x", 0.3, 3.0, 1.0,
-     dict(law="log", rand=(0.5, 2.0))),
-    ("bg_sh_sy", "Étirement y", 0.3, 3.0, 1.0,
-     dict(law="log", rand=(0.5, 2.5))),
-    ("bg_sh_sz", "Étirement z", 0.3, 3.0, 1.0,
-     dict(law="log", rand=(0.5, 2.0))),
-    ("bg_sh_round", "Arrondi", 0.0, 0.3, 0.0,
-     dict(step=0.005, rand=(0.0, 0.15), macros={"organic": -0.12, "fluid": 0.08})),
-    ("bg_sh_shell", "Coque (0 = plein)", 0.0, 0.2, 0.0,
-     dict(step=0.005, rand=(0.0, 0.12), zero=0.6, macros={"fill": -0.1},
-          tip="Épaisseur de la paroi : se voit quand la fusion creuse la forme")),
-    ("bg_sh_thick", "Épaisseur des barres", 0.01, 0.2, 0.04,
-     dict(step=0.005, rand=(0.02, 0.12), macros={"fill": 0.04},
-          tip="Fil de fer, croix, gyroïde (fraction de la période)")),
-    ("bg_sh_rot", "Rotation de l'instance", 0.0, 360.0, 0.0,
-     dict(step=1, law="angle", rand=(0.0, 360.0), shader=False)),
-    ("bg_sh_spin", "Rotation lente (tours/min)", -0.1, 0.1, 0.0,
-     dict(step=0.005, kind="phase", rand=(-0.06, 0.06), zero=0.4,
-          shader=False)),
-    ("bg_sh_wave", "Vague", 0.0, 1.0, 0.0,
-     dict(rand=(0.0, 0.6), zero=0.5, audio=("beat", 0.25),
-          tip="Les instances gonflent l'une après l'autre, en vague, au tempo")),
-)
-
-FU = _group(
-    "fu",
-    ("bg_fu_count", "Satellites", 0, MAX_SATELLITES, 0,
-     dict(step=1, kind="int", rand=(1, MAX_SATELLITES), zero=0.4,
-          macros={"complexity": 4})),
-    ("bg_fu_combo", "Combinaison", 0, len(COMBINATIONS) - 1, 0,
-     dict(step=1, options=COMBINATIONS, kind="int", rand=(0, 2),
-          weights=(60, 25, 15))),
-    ("bg_fu_k", "Viscosité", 0.05, 1.0, 0.3,
-     dict(rand=(0.1, 0.8), audio=("energy", 0.2),
-          macros={"organic": -0.3, "fluid": 0.2},
-          tip="Plus haut : les satellites fondent dans la forme comme un liquide")),
-    ("bg_fu_rad", "Rayon des satellites", 0.1, 1.0, 0.4,
-     dict(rand=(0.2, 0.8), tip="Fraction de la taille de la forme")),
-    ("bg_fu_spread", "Écartement", 0.0, 2.0, 1.2,
-     dict(rand=(0.6, 1.8), audio=("kick", 0.15),
-          tip="Distance des satellites, en tailles de la forme (le KICK les écarte)")),
-    ("bg_fu_orbit", "Orbite (tours/min)", 0.0, 0.5, 0.05,
-     dict(step=0.005, kind="phase", rand=(0.0, 0.3),
-          shader=False)),
-    ("bg_fu_glow", "Satellites lumineux", 0.0, 3.0, 0.6,
-     dict(step=0.05, kind="emissive", rand=(0.0, 2.0), audio=("kick", 0.2),
-          macros={"glow": 1.0})),
+VO = _group(
+    "vo",
+    ("bg_vo_twist", "Torsion (tours / 100 unités)", 0.0, 3.0, 0.0,
+     dict(step=0.05, kind="deform", rand=(0.0, 1.5), zero=0.7,
+          tip="L'espace tourne autour du trajet en avançant : le sol devient\n"
+              "une spirale")),
+    ("bg_vo_bend", "Courbure", -3.0, 3.0, 0.0,
+     dict(step=0.05, kind="deform", rand=(-2.0, 2.0), zero=0.6,
+          tip="Le relief se relève (ou plonge) en s'éloignant du trajet")),
+    ("bg_vo_wave_amp", "Ondes : amplitude", 0.0, 8.0, 0.0,
+     dict(step=0.05, kind="deform", rand=(0.0, 5.0), zero=0.6, tip="Unités du fond")),
+    ("bg_vo_wave_len", "Ondes : longueur", 4.0, 80.0, 30.0,
+     dict(step=0.5, law="log", kind="deform", rand=(10.0, 60.0), tip="Unités du fond")),
+    ("bg_vo_warp", "Warp 3D", 0.0, 1.0, 0.0,
+     dict(kind="deform", rand=(0.0, 0.7), zero=0.4, macros={"chaos": 0.3},
+          tip="Le bruit 3D déplace l'espace : surplombs, formes liquides\n"
+              "(en tailles du monde)")),
+    ("bg_vo_warp_size", "Warp 3D : taille", 0.3, 3.0, 1.0,
+     dict(law="log", kind="deform", rand=(0.5, 2.0), tip="En tailles du monde")),
+    ("bg_vo_warp_oct", "Warp 3D : couches", 1, 3, 2,
+     dict(step=1, kind="int", rand=(1, 3))),
+    ("bg_vo_caves", "Cavités", 0.0, 1.0, 0.0,
+     dict(kind="topology", rand=(0.2, 0.9), zero=0.5, macros={"hollow": 0.5},
+          tip="Grottes, arches et trous creusés en 3D (0 = aucune)")),
+    ("bg_vo_cave_mode", "Cavités : genre", 0, len(CAVE_MODES) - 1, 0,
+     dict(step=1, options=CAVE_MODES, kind="int", rand=(0, 1), weights=(65, 35),
+          tip="Creusées dans le relief : arches, surplombs, grottes dans les\n"
+              "montagnes. Roche dans tout l'espace : une caverne où l'objet\n"
+              "voyage dans un tunnel")),
+    ("bg_vo_cave_size", "Cavités : taille", 0.2, 2.0, 0.6,
+     dict(law="log", kind="topology", rand=(0.3, 1.2), macros={"hollow": 0.4},
+          tip="En tailles du monde")),
+    ("bg_vo_cave_detail", "Cavités : détail", 0.0, 1.0, 0.4,
+     dict(kind="deform", rand=(0.0, 0.8), macros={"complexity": 0.2},
+          tip="Parois plus tourmentées (couche de bruit trois fois plus fine)")),
+    ("bg_vo_bubbles", "Bulles", 0.0, 1.0, 0.0,
+     dict(kind="topology", rand=(0.2, 0.9), zero=0.6, macros={"hollow": 0.3},
+          tip="Part des cellules qui reçoivent une bulle (0 = aucune)")),
+    ("bg_vo_bubble_mode", "Bulles : genre", 0, len(BUBBLE_MODES) - 1, 0,
+     dict(step=1, options=BUBBLE_MODES, kind="int", rand=(0, 2), weights=(45, 30, 25),
+          tip="Creusées : alvéoles dans le relief ; pleines : bulles qui se\n"
+              "fondent au relief et flottent au-dessus")),
+    ("bg_vo_bubble_size", "Bulles : taille", 0.05, 1.0, 0.25,
+     dict(law="log", kind="topology", rand=(0.08, 0.5),
+          tip="Taille des cellules (en tailles du monde) ; une bulle en occupe\n"
+              "au plus 90 %")),
+    ("bg_vo_bubble_soft", "Bulles : fusion", 0.0, 1.0, 0.4,
+     dict(rand=(0.0, 0.9), tip="Raccord doux, comme un liquide, avec le relief")),
 )
 
 COL = _group(
@@ -403,9 +307,6 @@ COL = _group(
           tip="Nappes de bruit : taille des taches de couleur (unités du fond)")),
     ("bg_col_hue", "Décalage de teinte", 0.0, 1.0, 0.0,
      dict(law="angle", kind="color", rand=(0.0, 1.0), shader=False)),
-    ("bg_col_cycle", "Cycle de teinte (tours/min)", -1.0, 1.0, 0.0,
-     dict(kind="phase", rand=(-0.3, 0.3), audio=("energy", 0.5),
-          macros={"strange": 0.3}, shader=False)),
     ("bg_col_sat", "Saturation", 0.0, 1.0, 0.6,
      dict(kind="color", rand=(0.3, 1.0), audio=("energy", 0.15),
           macros={"glow": 0.3})),
@@ -428,16 +329,14 @@ COL = _group(
      dict(kind="color", rand=(0.0, 0.7), shader=False)),
     ("bg_col_hor_hue", "Couleur d'horizon", 0.0, 1.0, 0.72,
      dict(law="angle", kind="color", rand=(0.0, 1.0), shader=False)),
-    ("bg_col_hor_lum", "Luminosité d'horizon", 0.0, 1.0, 0.16,
-     dict(kind="color", rand=(0.03, 0.25), macros={"daylight": 0.35}, shader=False,
-          tip="Lueur de l'horizon dans laquelle le lointain se fond")),
+    ("bg_col_hor_lum", "Luminosité d'horizon", 0.0, 1.0, 0.3,
+     dict(kind="color", rand=(0.12, 0.45), macros={"daylight": 0.35}, shader=False,
+          tip="Lueur de l'horizon dans laquelle le lointain se fond : plus\n"
+              "claire que le relief, le lointain s'éclaircit (profondeur)")),
     ("bg_col_harmony", "Harmonie avec le modèle", 0, len(HARMONIES) - 1, 0,
      dict(step=1, options=HARMONIES, kind="int", shader=False,
           tip="Cale la teinte de la palette sur le rim du modèle\n"
               "(onglet Objet) : même teinte, complémentaire…")),
-    ("bg_col_music", "Teinte musicale", 0.0, 1.0, 0.0,
-     dict(kind="color", rand=(0.0, 0.5), shader=False,
-          tip="Aigus et basses font tourner la teinte")),
     ("bg_col_flash", "Flash de couleur", 0.0, 1.0, 0.0,
      dict(kind="emissive", rand=(0.0, 0.6), shader=False,
           tip="Les formes s'illuminent de la couleur des émissifs sur la caisse claire")),
@@ -461,18 +360,15 @@ MAT = _group(
     ("bg_mat_metal", "Métal", 0.0, 1.0, 0.0,
      dict(kind="color", rand=(0.0, 1.0))),
     ("bg_mat_transl", "Translucidité", 0.0, 1.0, 0.0,
-     dict(kind="color", rand=(0.0, 0.7), macros={"crystal": 0.5},
+     dict(kind="color", rand=(0.0, 0.7),
           tip="Fausse diffusion sous la surface : la lumière traverse")),
     ("bg_mat_emit", "Émission propre", 0.0, 4.0, 0.0,
      dict(step=0.05, kind="emissive", rand=(0.0, 1.0), audio=("rms", 0.15),
           macros={"glow": 1.0})),
     ("bg_mat_edges", "Arêtes lumineuses", 0.0, 3.0, 0.3,
      dict(step=0.05, kind="emissive", rand=(0.0, 2.0), audio=("treble", 0.2),
-          macros={"crystal": -1.0, "glow": 0.8}, shader=False,
+          macros={"glow": 0.8}, shader=False,
           tip="Les arêtes vives brillent (envoyé au shader comme u_edges)")),
-    ("bg_mat_chase", "Poursuite au beat", 0.0, 1.0, 0.0,
-     dict(kind="emissive", rand=(0.0, 1.0), zero=0.6,
-          tip="Une instance sur quatre s'allume, à tour de rôle sur chaque beat")),
     ("bg_mat_glow", "Halo des formes", 0.0, 2.0, 0.3,
      dict(kind="emissive", rand=(0.0, 1.0), macros={"glow": 0.8, "energy": 0.3},
           tip="Lueur autour des formes (frôlements du rayon)")),
@@ -481,7 +377,7 @@ MAT = _group(
     ("bg_mat_ao", "Occlusion des creux", 0.0, 2.0, 1.0,
      dict(kind="color", rand=(0.5, 1.5), macros={"contrast": 0.5})),
     ("bg_mat_env", "Reflets de l'environnement", 0.0, 2.0, 1.0,
-     dict(kind="color", rand=(0.3, 1.5), macros={"crystal": -0.4},
+     dict(kind="color", rand=(0.3, 1.5),
           tip="Les formes reflètent le ciel et l'horizon, nets si la matière\n"
               "est lisse, flous si elle est rugueuse")),
     ("bg_mat_rim", "Contre-jour", 0.0, 2.0, 0.6,
@@ -489,7 +385,7 @@ MAT = _group(
           tip="Le bord des formes s'éclaire de la couleur de la brume :\n"
               "elles se détachent du fond")),
     ("bg_mat_bump", "Relief de surface", 0.0, 1.0, 0.3,
-     dict(kind="color", rand=(0.0, 0.8), macros={"crystal": 0.4},
+     dict(kind="color", rand=(0.0, 0.8),
           tip="Bosses fines dessinées par la lumière (ne coûte presque rien)")),
     ("bg_mat_bump_size", "Taille du relief", 0.05, 2.0, 0.4,
      dict(step=0.01, law="log", kind="color", rand=(0.1, 1.0),
@@ -499,7 +395,7 @@ MAT = _group(
     ("bg_mat_veins", "Veines lumineuses", 0.0, 3.0, 0.0,
      dict(step=0.05, kind="emissive", rand=(0.0, 2.0), zero=0.6,
           audio=("energy", 0.3), macros={"glow": 0.6},
-          tip="Des veines de la couleur des émissifs parcourent les formes")),
+          tip="Des veines de la couleur des émissifs parcourent le relief (figées)")),
     ("bg_mat_veins_width", "Finesse des veines", 0.01, 0.2, 0.05,
      dict(step=0.005, kind="emissive", rand=(0.02, 0.12),
           tip="Petit = veines fines")),
@@ -525,9 +421,10 @@ MAT = _group(
      dict(kind="color", rand=(0.1, 1.0), macros={"daylight": 0.6}, shader=False)),
     ("bg_light_sky_hue", "Ciel : teinte", 0.0, 1.0, 0.6,
      dict(law="angle", kind="color", rand=(0.0, 1.0), shader=False)),
-    ("bg_light_shadow", "Dureté des ombres", 0.0, 1.0, 0.0,
+    ("bg_light_shadow", "Dureté des ombres", 0.0, 1.0, 0.6,
      dict(kind="color", rand=(0.0, 1.0), macros={"contrast": 0.4},
-          tip="0 = pas d'ombre portée (plus léger), 1 = ombres nettes")),
+          tip="Ombres portées du relief et de l'objet sur le relief.\n"
+              "0 = pas d'ombre portée (plus léger), 1 = ombres nettes")),
     ("bg_light_center", "Le modèle éclaire le fond", 0.0, 4.0, 0.5,
      dict(step=0.05, kind="emissive", rand=(0.0, 2.0), audio=("rms", 0.2),
           shader=False, tip="Lumière au centre de la scène, couleur du rim du modèle")),
@@ -539,9 +436,9 @@ MAT = _group(
 MOV = _group(
     "mov",
     ("bg_mov_speed", "Vitesse", 0.05, 4.0, 1.0,
-     dict(law="log", kind="phase", rand=(0.4, 2.0), audio=("energy", 0.3),
-          macros={"energy": 1.0}, shader=False,
-          tip="Multiplie tous les mouvements propres du fond")),
+     dict(law="log", kind="phase", rand=(0.4, 2.0), shader=False,
+          tip="Multiplie les mouvements propres du fond (rotation, dérive,\n"
+              "respiration) ; le relief, lui, reste fixe")),
     ("bg_mov_rot_az", "Rotation : azimut de l'axe", 0.0, 360.0, 30.0,
      dict(step=1, law="angle", rand=(0.0, 360.0), shader=False)),
     ("bg_mov_rot_tilt", "Rotation : inclinaison de l'axe", 0.0, 90.0, 25.0,
@@ -557,19 +454,15 @@ MOV = _group(
     ("bg_mov_dir_az", "Direction du voyage : azimut", 0.0, 360.0, 0.0,
      dict(step=1, law="angle", rand=(0.0, 360.0), shader=False,
           tip="0 = droit devant, vers le fond de l'écran (vue de départ)")),
-    ("bg_mov_dir_el", "Direction du voyage : hauteur", -90.0, 90.0, 0.0,
-     dict(step=1, rand=(-20.0, 20.0), shader=False,
-          tip="Monter ou descendre ; ignoré en Grille au sol et en Paysage\n"
-              "(le sol reste au sol)")),
     ("bg_mov_breath", "Respiration", 0.0, 0.3, 0.0,
-     dict(step=0.005, rand=(0.0, 0.03), shader=False,
+     dict(step=0.005, shader=False,
           tip="Le fond grandit et rétrécit au tempo")),
     ("bg_mov_breath_beats", "Respiration : période", 0, len(BREATH_BEATS) - 1, 3,
      dict(step=1, options=tuple(b[1] for b in BREATH_BEATS), kind="int",
           rand=(1, 4), shader=False)),
-    ("bg_mov_drift", "Dérive", 0.0, 2.0, 0.1,
-     dict(kind="phase", rand=(0.0, 0.4), macros={"fluid": 0.3}, shader=False,
-          tip="Flottement lent du fond, sans motif visible")),
+    ("bg_mov_drift", "Dérive", 0.0, 2.0, 0.0,
+     dict(kind="phase", shader=False,
+          tip="Flottement lent du fond, sans motif visible (0 = décor fixe)")),
     ("bg_mov_sync", "Synchro au tempo", 0.0, 1.0, 0.0,
      dict(kind="setting", shader=False,
           tip="1 = les vitesses suivent le BPM (référence 120)")),
@@ -602,10 +495,6 @@ COMP = _group(
      dict(step=0.05, shader=False)),
     ("bg_comp_roll", "Inclinaison de l'horizon", -45.0, 45.0, 0.0,
      dict(step=0.5, rand=(-12.0, 12.0), shader=False)),
-    ("bg_comp_void", "Vide central", 0.0, 20.0, 6.0,
-     dict(step=0.1, macros={"tension": 3.0},
-          tip="Rayon sans formes autour du modèle (le modèle a un rayon de 1) :\n"
-              "des cellules entières disparaissent, aucune forme n'est tranchée")),
     ("bg_comp_halo", "Halo autour du modèle", -1.0, 1.0, -0.3,
      dict(kind="color", audio=("rms", 0.1),
           tip="−1 = assombrit le fond derrière le modèle, +1 = l'éclaire")),
@@ -617,8 +506,13 @@ COMP = _group(
           tip="La brume s'éclaire dans la direction de la lumière")),
     ("bg_comp_fade", "Brume de distance", 0.05, 2.0, 0.85,
      dict(kind="color", macros={"depth": -0.25},
-          tip="Le lointain se fond dans la couleur d'horizon")),
-    ("bg_comp_horizon", "Horizon (distance max)", 20.0, 300.0, 150.0,
+          tip="Le lointain se fond dans la couleur d'horizon ; la brume est\n"
+              "plus dense au fond des vallées")),
+    ("bg_comp_fog_height", "Hauteur de la brume", 0.2, 4.0, 1.0,
+     dict(law="log", kind="color", rand=(0.5, 2.0),
+          tip="En hauteurs du relief : bas = brume couchée au fond des vallées,\n"
+              "sommets nets ; haut = brume partout")),
+    ("bg_comp_horizon", "Horizon (distance max)", 20.0, 400.0, 220.0,
      dict(step=1, kind="setting", macros={"depth": 80.0},
           tip="Au-delà, tout est dans la brume ; la marche s'arrête plus tôt\n"
               "quand la brume est opaque (pas de coût inutile)")),
@@ -635,7 +529,7 @@ SOLID = [
     for c, name, v in (("r", "rouge", 4), ("g", "vert", 4), ("b", "bleu", 10))
 ]
 
-PARAMS = TOP + _macro_params() + NW + SP + DX + SH + FU + COL + MAT + MOV + COMP + SOLID
+PARAMS = TOP + _macro_params() + LD + VO + COL + MAT + MOV + COMP + SOLID
 BY_KEY = {p.key: p for p in PARAMS}
 MACRO_KEYS = [f"bg_m_{n}" for n, *_ in MACROS_AMB + MACROS_FORM]
 # groupes qui ont un dé et un cadenas
@@ -661,108 +555,82 @@ MATERIALS = {
 # ambiances intégrées : presets de l'onglet Fond (T24 : jamais copiés dans
 # presets.json) ; les réglages absents reprennent leur défaut
 AMBIANCES = {
-    "Ferrofluide": {
-        "bg_visible": 1.0, "bg_sp_mode": 0.0, "bg_sp_period": 6.0,
-        "bg_sp_along": 6.0, "bg_sp_dist": 2.0, "bg_sh_a": 0.0, "bg_sh_size": 0.28,
-        "bg_fu_count": 6.0, "bg_fu_k": 0.6, "bg_fu_rad": 0.45, "bg_fu_spread": 1.1,
-        "bg_fu_orbit": 0.1, "bg_fu_glow": 0.0, "bg_mat_preset": 6.0,
-        "bg_mat_rough": 0.18, "bg_mat_metal": 0.6, "bg_mat_fresnel": 1.2,
-        "bg_col_mode": 3.0, "bg_col_a_hue": 0.62, "bg_col_a_lum": 0.6,
-        "bg_col_irid": 0.6, "bg_light_shadow": 0.5,
-        "bg_comp_fade": 0.3},
-    "Cathédrale KIFS": {
-        "bg_visible": 1.0, "bg_sp_mode": 5.0, "bg_sp_period": 16.0,
-        "bg_sp_along": 12.0, "bg_sp_iter": 3.0, "bg_sp_angle": 12.0,
-        "bg_sp_fscale": 2.0, "bg_sp_off_x": 1.0, "bg_sp_off_y": 1.0,
-        "bg_sp_off_z": 0.6, "bg_sh_a": 8.0, "bg_sh_size": 0.4, "bg_sh_thick": 0.06,
-        "bg_mat_preset": 0.0, "bg_col_mode": 1.0, "bg_col_a_hue": 0.08,
-        "bg_col_a_sat": 0.3, "bg_col_b_hue": 0.11, "bg_col_b_sat": 0.25,
-        "bg_col_source": 0.0, "bg_mat_edges": 0.6, "bg_light_shadow": 0.6},
-    "Récif tordu": {
-        "bg_visible": 1.0, "bg_sp_mode": 1.0, "bg_sp_period": 5.0,
-        "bg_dx_warp_amp": 1.5, "bg_dx_warp_freq": 0.12, "bg_dx_warp_oct": 2.0,
-        "bg_sh_a": 5.0, "bg_sh_b": 0.0, "bg_sh_morph": 0.5, "bg_sh_size": 0.3,
-        "bg_sp_disorder": 0.5, "bg_col_mode": 0.0, "bg_col_preset": 6.0,
-        "bg_col_source": 4.0, "bg_mat_preset": 4.0, "bg_mat_rough": 1.0,
-        "bg_mat_transl": 0.3, "bg_mat_fresnel": 1.4},
-    "Hélices": {
-        "bg_visible": 1.0, "bg_sp_mode": 3.0, "bg_sp_period": 3.5,
-        "bg_sp_along": 2.5, "bg_sp_count": 6.0, "bg_dx_twist": 0.03,
-        "bg_sh_a": 6.0, "bg_sh_sz": 2.0, "bg_sh_size": 0.3, "bg_col_mode": 5.0,
-        "bg_mat_preset": 3.0, "bg_mat_emit": 1.5, "bg_mat_rough": 0.4,
-        "bg_mat_chase": 0.7, "bg_mov_travel": 1.5, "bg_comp_void": 4.0},
-    "Kaléidoscope": {
-        "bg_visible": 1.0, "bg_sp_mode": 4.0, "bg_sp_period": 4.0,
-        "bg_sp_along": 8.0, "bg_sp_mirror_x": 1.0, "bg_sp_mirror_y": 1.0,
-        "bg_sp_mirror_z": 1.0, "bg_sp_disorder": 0.6, "bg_sp_missing": 0.4,
-        "bg_sh_a": 3.0, "bg_sh_b": 4.0, "bg_sh_morph": 0.3, "bg_sh_spin": 0.03,
-        "bg_col_mode": 4.0, "bg_col_source": 4.0, "bg_mat_preset": 5.0,
-        "bg_mat_rough": 0.3, "bg_mat_metal": 0.3, "bg_mat_transl": 0.4,
-        "bg_col_irid": 0.8},
-    "Jardin de gyroïdes": {
-        "bg_visible": 1.0, "bg_sp_mode": 2.0, "bg_sp_period": 7.0,
-        "bg_sh_a": 9.0, "bg_sh_size": 0.4, "bg_sh_sy": 1.5, "bg_sh_thick": 0.03,
-        "bg_sp_eq": 0.4, "bg_dx_wave_amp": 0.12, "bg_dx_wave_len": 14.0,
-        "bg_mat_preset": 2.0, "bg_mat_rough": 0.05, "bg_mat_transl": 0.8,
-        "bg_mat_fresnel": 1.6, "bg_col_mode": 2.0, "bg_col_source": 0.0},
-    "Essaim": {
-        "bg_visible": 1.0, "bg_sp_mode": 1.0, "bg_sp_period": 9.0,
-        "bg_sp_missing": 0.5, "bg_sh_a": 0.0, "bg_sh_size": 0.12,
-        "bg_fu_count": 8.0, "bg_fu_k": 0.15, "bg_fu_spread": 1.8, "bg_fu_rad": 0.5,
-        "bg_fu_orbit": 0.3, "bg_fu_glow": 1.5, "bg_dx_wave_amp": 0.15,
-        "bg_col_mode": 7.0, "bg_col_source": 4.0, "bg_mat_preset": 3.0,
-        "bg_mat_emit": 0.8, "bg_mat_rough": 0.4},
-    "Monolithes": {
-        "bg_visible": 1.0, "bg_sp_mode": 0.0, "bg_sp_period": 4.0,
-        "bg_sp_along": 8.0, "bg_sp_dist": 1.0, "bg_sh_a": 1.0, "bg_sh_size": 0.3,
-        "bg_sh_sx": 0.6, "bg_sh_sy": 3.0, "bg_sh_sz": 0.6, "bg_sh_shell": 0.05,
-        "bg_fu_count": 4.0, "bg_fu_combo": 1.0, "bg_fu_rad": 0.6,
-        "bg_fu_spread": 0.7, "bg_fu_glow": 0.0, "bg_light_mode": 1.0,
-        "bg_light_el": 12.0, "bg_light_temp": 3200.0, "bg_light_shadow": 0.7,
-        "bg_mat_preset": 0.0, "bg_col_mode": 3.0, "bg_col_a_hue": 0.05,
-        "bg_comp_fade": 0.3},
-    "Grotte de cristal": {
-        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 0.0, "bg_nw_scale": 14.0,
-        "bg_nw_fill": 0.5, "bg_nw_warp": 0.8, "bg_nw_detail": 0.4, "bg_nw_fine": 0.12,
-        "bg_mat_preset": 2.0, "bg_mat_rough": 0.05, "bg_mat_transl": 0.8,
-        "bg_mat_fresnel": 1.6, "bg_mat_env": 1.3, "bg_col_mode": 2.0,
-        "bg_col_irid": 0.7, "bg_mat_veins": 1.2, "bg_mat_veins_size": 6.0,
-        "bg_col_emit_hue": 0.55, "bg_light_center": 1.5},
-    "Entrailles": {
-        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 0.0, "bg_nw_scale": 10.0,
-        "bg_nw_fill": 0.58, "bg_nw_warp": 1.5, "bg_nw_warp_size": 0.6,
-        "bg_nw_detail": 0.3, "bg_nw_breath": 0.12, "bg_nw_flow": 0.2,
-        "bg_mat_preset": 4.0, "bg_mat_rough": 0.35, "bg_mat_transl": 0.6,
-        "bg_mat_fresnel": 1.2, "bg_col_mode": 7.0, "bg_col_hue": 0.95,
-        "bg_mat_bump": 0.6, "bg_mat_bump_size": 0.3, "bg_mat_veins": 0.8,
-        "bg_mat_veins_size": 3.0, "bg_col_emit_hue": 0.02},
-    "Océan de mercure": {
-        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 1.0, "bg_nw_scale": 20.0,
-        "bg_nw_warp": 0.9, "bg_nw_gyroid": 0.6, "bg_nw_thick": 0.18,
-        "bg_nw_flow": 0.18, "bg_mat_preset": 1.0, "bg_mat_rough": 0.1,
-        "bg_mat_metal": 1.0, "bg_mat_fresnel": 1.0, "bg_mat_env": 1.8,
-        "bg_col_mode": 3.0, "bg_col_a_hue": 0.6, "bg_col_a_lum": 0.7,
-        "bg_mat_bump": 0.0, "bg_mat_grain": 0.0, "bg_col_hor_lum": 0.25},
-    "Membranes néon": {
-        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 1.0, "bg_nw_scale": 12.0,
-        "bg_nw_warp": 1.3, "bg_nw_gyroid": 0.2, "bg_nw_thick": 0.07,
-        "bg_nw_detail": 0.5, "bg_mat_preset": 3.0, "bg_mat_transl": 0.7,
-        "bg_mat_emit": 0.8, "bg_mat_rough": 0.4, "bg_col_mode": 5.0,
-        "bg_col_source": 5.0, "bg_mat_veins": 1.5, "bg_mat_veins_width": 0.03},
     "Planète inconnue": {
-        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 2.0, "bg_nw_scale": 30.0,
-        "bg_nw_relief": 2.5, "bg_nw_warp": 1.0, "bg_nw_detail": 0.45,
-        "bg_nw_fine": 0.15, "bg_mat_preset": 0.0, "bg_col_mode": 1.0,
+        "bg_visible": 1.0, "bg_ld_scale": 30.0, "bg_ld_relief": 3.0,
+        "bg_ld_warp": 1.0, "bg_ld_octaves": 7.0, "bg_ld_erosion": 0.4,
+        "bg_mat_preset": 0.0, "bg_col_mode": 1.0,
         "bg_col_a_hue": 0.05, "bg_col_b_hue": 0.55, "bg_col_source": 0.0,
         "bg_light_mode": 1.0, "bg_light_el": 18.0, "bg_light_temp": 4200.0,
         "bg_light_shadow": 0.6, "bg_comp_fade": 0.4, "bg_col_hor_lum": 0.3,
         "bg_comp_fog_glow": 1.2},
     "Canyon voûté": {
-        "bg_visible": 1.0, "bg_nw_gen": 1.0, "bg_nw_mode": 2.0, "bg_nw_scale": 18.0,
-        "bg_nw_relief": 1.8, "bg_nw_vault": 1.0, "bg_nw_warp": 1.2,
-        "bg_nw_detail": 0.4, "bg_mat_preset": 4.0, "bg_mat_rough": 0.9,
+        "bg_visible": 1.0, "bg_ld_scale": 18.0, "bg_ld_relief": 2.6,
+        "bg_ld_vault": 1.0, "bg_ld_warp": 1.2, "bg_ld_erosion": 0.6,
+        "bg_ld_terrace": 0.3, "bg_mat_preset": 4.0, "bg_mat_rough": 0.9,
         "bg_col_mode": 2.0, "bg_col_source": 6.0, "bg_mat_veins": 1.0,
         "bg_mat_veins_size": 8.0, "bg_col_emit_hue": 0.5, "bg_light_center": 2.0},
+    "Montagnes à crêtes": {
+        "bg_visible": 1.0, "bg_ld_scale": 28.0, "bg_ld_relief": 4.0,
+        "bg_ld_octaves": 8.0, "bg_ld_rough": 0.52, "bg_ld_lacun": 2.1,
+        "bg_ld_ridges": 0.9, "bg_ld_erosion": 0.7, "bg_ld_warp": 0.4,
+        "bg_ld_valley": 8.0, "bg_mat_preset": 0.0, "bg_col_mode": 3.0,
+        "bg_col_a_hue": 0.6, "bg_col_a_lum": 0.6, "bg_col_source": 0.0,
+        "bg_light_shadow": 0.8, "bg_col_hor_lum": 0.22, "bg_comp_fog_tint": 0.4},
+    "Dunes": {
+        "bg_visible": 1.0, "bg_ld_scale": 14.0, "bg_ld_relief": 1.3,
+        "bg_ld_octaves": 4.0, "bg_ld_rough": 0.35, "bg_ld_lacun": 2.4,
+        "bg_ld_ridges": 0.7, "bg_ld_erosion": 0.0, "bg_ld_warp": 1.4,
+        "bg_ld_warp_size": 1.6, "bg_mat_preset": 4.0, "bg_mat_rough": 1.0,
+        "bg_col_mode": 1.0, "bg_col_a_hue": 0.07, "bg_col_a_sat": 0.6,
+        "bg_col_a_lum": 0.5, "bg_col_b_hue": 0.1, "bg_col_b_sat": 0.4,
+        "bg_col_b_lum": 1.0, "bg_col_source": 2.0, "bg_light_mode": 1.0,
+        "bg_light_el": 14.0, "bg_light_temp": 3800.0, "bg_light_shadow": 0.9,
+        "bg_mat_bump": 0.15, "bg_col_hor_hue": 0.07, "bg_col_hor_lum": 0.25},
+    "Plateaux en terrasses": {
+        "bg_visible": 1.0, "bg_ld_scale": 22.0, "bg_ld_relief": 2.8,
+        "bg_ld_octaves": 6.0, "bg_ld_terrace": 0.85, "bg_ld_terrace_n": 7.0,
+        "bg_ld_erosion": 0.3, "bg_ld_warp": 0.7, "bg_mat_preset": 0.0,
+        "bg_col_mode": 2.0, "bg_col_source": 0.0, "bg_mat_grain": 0.4,
+        "bg_light_shadow": 0.7},
+    "Canyon érodé": {
+        "bg_visible": 1.0, "bg_ld_scale": 20.0, "bg_ld_relief": 3.6,
+        "bg_ld_valley": 9.0, "bg_ld_octaves": 7.0, "bg_ld_erosion": 1.0,
+        "bg_ld_ridges": 0.5, "bg_ld_terrace": 0.35, "bg_ld_terrace_n": 10.0,
+        "bg_ld_warp": 0.9, "bg_mat_preset": 4.0, "bg_mat_rough": 1.0,
+        "bg_col_mode": 0.0, "bg_col_preset": 2.0, "bg_col_source": 6.0,
+        "bg_light_shadow": 0.8},
+    "Collines": {
+        "bg_visible": 1.0, "bg_ld_scale": 26.0, "bg_ld_relief": 1.2,
+        "bg_ld_octaves": 6.0, "bg_ld_rough": 0.45, "bg_ld_ridges": 0.0,
+        "bg_ld_erosion": 0.2, "bg_ld_warp": 0.5, "bg_ld_valley": 5.0,
+        "bg_mat_preset": 0.0, "bg_col_mode": 1.0, "bg_col_a_hue": 0.28,
+        "bg_col_b_hue": 0.18, "bg_light_mode": 1.0, "bg_light_el": 35.0,
+        "bg_light_temp": 5800.0, "bg_light_shadow": 0.6, "bg_col_hor_lum": 0.3,
+        "bg_light_sky": 0.8},
+    "Grotte de cristal": {
+        "bg_visible": 1.0, "bg_ld_scale": 16.0, "bg_ld_relief": 2.4,
+        "bg_ld_vault": 1.0, "bg_ld_octaves": 7.0, "bg_ld_erosion": 0.5,
+        "bg_vo_caves": 0.7, "bg_vo_cave_mode": 1.0, "bg_vo_cave_size": 0.8,
+        "bg_vo_warp": 0.3, "bg_mat_preset": 2.0, "bg_mat_rough": 0.05,
+        "bg_mat_transl": 0.8, "bg_mat_fresnel": 1.6, "bg_mat_env": 1.3,
+        "bg_col_mode": 2.0, "bg_col_irid": 0.7, "bg_mat_veins": 1.2,
+        "bg_mat_veins_size": 6.0, "bg_col_emit_hue": 0.55, "bg_light_center": 1.5},
+    "Arches et alvéoles": {
+        "bg_visible": 1.0, "bg_ld_scale": 22.0, "bg_ld_relief": 3.0,
+        "bg_ld_octaves": 7.0, "bg_ld_ridges": 0.4, "bg_ld_erosion": 0.6,
+        "bg_vo_caves": 0.8, "bg_vo_cave_size": 0.5, "bg_vo_cave_detail": 0.5,
+        "bg_vo_bubbles": 0.6, "bg_vo_bubble_mode": 0.0, "bg_vo_bubble_size": 0.2,
+        "bg_vo_warp": 0.4, "bg_mat_preset": 0.0, "bg_col_mode": 0.0,
+        "bg_col_preset": 4.0, "bg_col_source": 6.0, "bg_light_shadow": 0.8},
+    "Entrailles": {
+        "bg_visible": 1.0, "bg_ld_scale": 12.0, "bg_ld_relief": 2.0,
+        "bg_ld_vault": 1.0, "bg_ld_warp": 1.4, "bg_vo_warp": 0.6,
+        "bg_vo_warp_size": 0.8, "bg_vo_twist": 0.6, "bg_vo_bubbles": 0.7,
+        "bg_vo_bubble_mode": 2.0, "bg_vo_bubble_size": 0.3, "bg_vo_bubble_soft": 0.8,
+        "bg_mat_preset": 4.0, "bg_mat_rough": 0.35, "bg_mat_transl": 0.6,
+        "bg_mat_fresnel": 1.2, "bg_col_mode": 7.0, "bg_col_hue": 0.95,
+        "bg_mat_bump": 0.6, "bg_mat_bump_size": 0.3, "bg_mat_veins": 0.8,
+        "bg_mat_veins_size": 3.0, "bg_col_emit_hue": 0.02},
 }
 
 
@@ -782,10 +650,19 @@ def glsl_declarations() -> str:
     return "".join(f"uniform float {p.uniform};\n" for p in PARAMS if p.shader)
 
 
-def _check_range(p: Param) -> list:
+def _check_kind(p: Param) -> list:
     errors = []
     if p.kind not in KINDS:
         errors.append(f"classe inconnue {p.kind}")
+    if p.rand is not None and p.kind == "setting":
+        errors.append("un réglage ne se tire pas au dé")
+    if p.kind == "terrain" and p.shader:
+        errors.append("relief précalculé : pas d'uniform")
+    return errors
+
+
+def _check_range(p: Param) -> list:
+    errors = []
     if p.law not in ("lin", "log", "angle"):
         errors.append(f"loi inconnue {p.law}")
     if not p.lo <= p.default <= p.hi:
@@ -796,8 +673,6 @@ def _check_range(p: Param) -> list:
         errors.append("plage ≠ nombre d'options")
     if p.rand is not None and not (p.lo <= p.rand[0] <= p.rand[1] <= p.hi):
         errors.append("plage du dé hors de [min, max]")
-    if p.rand is not None and p.kind == "setting":
-        errors.append("un réglage ne se tire pas au dé")
     if p.weights is not None and (p.rand is None
                                   or len(p.weights) != int(p.rand[1] - p.rand[0]) + 1):
         errors.append("un poids par valeur de la plage du dé")
@@ -819,8 +694,8 @@ def _check_audio(p: Param) -> list:
         errors.append("structure pilotée par une source rapide")
     if src in FAST_SOURCES and p.kind not in FAST_OK:
         errors.append(f"{src} sur un paramètre {p.kind}")
-    if p.kind == "setting":
-        errors.append("un réglage ne réagit pas à la musique")
+    if p.kind in ("setting", "terrain"):
+        errors.append(f"un paramètre {p.kind} ne réagit pas à la musique")
     return errors
 
 
@@ -832,7 +707,7 @@ def validate() -> list:
     for p in PARAMS:
         if not p.key.startswith("bg_"):
             errors.append(f"{p.key} : la clé doit commencer par bg_")
-        errors += [f"{p.key} : {e}" for e in _check_range(p) + _check_audio(p)]
+        errors += [f"{p.key} : {e}" for e in _check_kind(p) + _check_range(p) + _check_audio(p)]
     for key in MACRO_KEYS:
         if not any(key[5:] in p.macros for p in PARAMS):
             errors.append(f"{key} : macro sans effet")

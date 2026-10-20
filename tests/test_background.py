@@ -1,6 +1,6 @@
-"""Fond SDF (T16) : schéma des paramètres, chaîne d'étages, macros, dé,
-recettes, état d'une frame à l'autre, bruit 3D, palettes, résolution
-automatique — tout ce qui se teste sans GL."""
+"""Fond SDF (T16) : schéma des paramètres, paysage, macros, dé, recettes,
+état d'une frame à l'autre, bruit 3D, palettes, résolution automatique —
+tout ce qui se teste sans GL (les cartes du relief : tests/test_terrain.py)."""
 
 import math
 import os
@@ -8,7 +8,7 @@ import os
 import numpy as np
 import pytest
 
-from background import macros, noise, palettes, params, quality, schema
+from background import macros, noise, palettes, params, quality, schema, terrain
 from background.params import BackgroundState, travel_dir
 from background.pass_ import RESOLVE_FILE, SHADER_DIR, SHADER_FILES, fragment_source
 from gfx.camera import OrbitCamera, look_at
@@ -54,48 +54,116 @@ def test_fragment_source_has_defines_and_declarations():
         src = fragment_source(level)
         assert src.startswith("#version 330")
         assert f"#define MAX_STEPS {quality.LEVELS[level]['MAX_STEPS']}" in src
-        assert "uniform float u_sp_period;" in src
+        assert "uniform float u_ld_valley;" in src
 
 
-def test_shader_files_are_the_chain():
-    """Un seul shader de forme : la chaîne ; les 4 scènes de la passe 1 sont
-    parties (+ la passe de résolution, passe 5)."""
+def test_shader_files_are_the_landscape():
+    """Un seul générateur : le paysage ; la chaîne d'étages et les mondes de
+    bruit sont partis (+ la passe de résolution, passe 5)."""
     assert sorted(os.listdir(SHADER_DIR)) == sorted(SHADER_FILES + [RESOLVE_FILE])
-    assert "geometric.glsl" not in SHADER_FILES
+    assert "landscape.glsl" in SHADER_FILES and "chain.glsl" not in SHADER_FILES
 
 
 def test_python_and_glsl_constants_agree():
-    chain = open(os.path.join(SHADER_DIR, "chain.glsl"), encoding="utf-8").read()
-    assert f"const float KIFS_SIZE = {params.KIFS_SIZE};" in chain
-    assert f"const float SINGLE_SIZE = {params.SINGLE_SIZE};" in chain
-    assert f"const float NOISE_CELLS = {float(noise.CELLS)};" in chain
-    assert f"u_sat[{schema.MAX_SATELLITES}]" in chain
-    assert f"i < {schema.MAX_FOLDS}" in chain
+    src = open(os.path.join(SHADER_DIR, "landscape.glsl"), encoding="utf-8").read()
+    assert f"const float NOISE_CELLS = {float(noise.CELLS)};" in src
+    assert f"const float TILE = {terrain.TILE};" in src
+    assert f"const float DETAIL_TILE = {terrain.DETAIL_TILE};" in src
+    assert f"const float VALLEY_EDGE = {params.VALLEY_EDGE};" in src
+    assert f"const float WARP_GAIN = {params.WARP_GAIN};" in src
+    assert f"const float BUBBLE_MAX = {params.BUBBLE_MAX};" in src
+    # uniforms posés par la passe GL (cartes) et le renderer (ombre du modèle)
+    glsl = src + open(os.path.join(SHADER_DIR, "common.glsl"), encoding="utf-8").read()
+    for name in ("u_ld_res", "u_ld_slope", "u_ld_dslope", "u_ld_dgain", "u_ld_damp",
+                 "u_terrain", "u_terrain_fine", "u_model_c", "u_model_r",
+                 "u_vo_lip", "u_vo_cave_thr", "u_vo_G"):
+        assert f" {name};" in glsl or f" {name}; " in glsl, name
 
 
-# ── chaîne d'étages ───────────────────────────────────────────────────
-def test_old_scenes_are_gone():
+def test_decor_does_not_move_with_time_in_the_shaders():
+    """Décor statique : plus d'horloge dans les shaders (flux, veines qui
+    glissaient, poursuite au beat, vague)."""
+    glsl = "".join(open(os.path.join(SHADER_DIR, n), encoding="utf-8").read()
+                   for n in SHADER_FILES)
+    assert "u_time" not in glsl and "u_beat" not in glsl
+
+
+# ── paysage seul ──────────────────────────────────────────────────────
+def test_only_the_landscape_is_left():
     keys = schema.defaults()
-    assert not any(k.startswith("bg_geo_") for k in keys)
-    assert "bg_type" not in keys
-    assert not hasattr(schema, "TYPES") and not hasattr(schema, "GEO_VARIANTS")
+    for prefix in ("bg_geo_", "bg_sp_", "bg_dx_", "bg_sh_", "bg_fu_", "bg_nw_"):
+        assert not any(k.startswith(prefix) for k in keys), prefix
+    for key in ("bg_type", "bg_col_cycle", "bg_col_music", "bg_mat_chase",
+                "bg_comp_void", "bg_mov_dir_el", "bg_ld_water", "bg_ld_ripple",
+                "bg_ld_clarity"):
+        assert key not in keys
+    assert [g for g, _ in schema.GROUPS if g in ("sp", "dx", "sh", "fu", "nw")] == []
 
 
-@pytest.mark.parametrize("group, mode", [("sp", "bg_sp_mode"), ("dx", "bg_dx_axis"),
-                                         ("sh", "bg_sh_a"), ("fu", "bg_fu_combo")])
-def test_each_stage_has_a_mode_dice_and_lock(group, mode):
-    assert schema.BY_KEY[mode].group == group and schema.BY_KEY[mode].options
-    assert group in schema.DICE_GROUPS and group in schema.LOCK_KEYS
-    assert len(schema.params_of(group)) >= 3
+def test_landscape_and_volume_groups_have_dice_and_lock():
+    for group in ("ld", "vo"):
+        assert group in schema.DICE_GROUPS and group in schema.LOCK_KEYS
+        assert len(schema.params_of(group)) >= 12
 
 
-def test_panel_defaults_include_background():
-    from gfx.controls import DEFAULTS
-    for key, value in schema.defaults().items():
-        assert DEFAULTS[key] == value
-    assert DEFAULTS["bg_visible"] == 0.0          # ancien preset → fond masqué
-    assert DEFAULTS["show_grid"] == 1.0           # la grille garde sa clé
-    assert (DEFAULTS["bg_r"], DEFAULTS["bg_g"], DEFAULTS["bg_b"]) == (4, 4, 10)
+def test_volume_stretch_is_one_without_distortion_and_grows():
+    v = macros.apply(schema.defaults())
+    assert params.volume_stretch(v) == 1.0
+    assert params.volume_stretch(dict(v, bg_vo_wave_amp=3.0)) > 1.0
+    assert params.volume_stretch(dict(v, bg_vo_warp=0.8)) > \
+        params.volume_stretch(dict(v, bg_vo_warp=0.3)) > 1.0
+    # deux ondulations enchaînées : les étirements se multiplient
+    w = dict(v, bg_vo_wave_amp=2.0, bg_vo_wave_len=10.0)
+    ka = 2.0 * math.pi * 2.0 / 10.0
+    assert params.volume_stretch(w) >= (1.0 + ka) * (1.0 + 0.73 * ka)
+
+
+def test_caves_leave_the_asked_share_of_space():
+    values = (noise.texture()[..., 0].astype(float) - 0.5) * 2.0
+    v = macros.apply(schema.defaults())
+    for caves in (0.2, 0.6, 1.0):
+        carved = params.cave_threshold(dict(v, bg_vo_caves=caves, bg_vo_cave_mode=0.0))
+        assert (values > carved).mean() == pytest.approx(0.5 * caves, abs=0.01)
+        rock = params.cave_threshold(dict(v, bg_vo_caves=caves, bg_vo_cave_mode=1.0))
+        assert (values > rock).mean() == pytest.approx(0.2 + 0.4 * caves, abs=0.01)
+
+
+def test_noise_slope_quantile_is_below_the_maximum():
+    assert 0.0 < noise.gradient_norm(99.0) < noise.gradient_norm(100.0) < 0.5
+
+
+def test_terrain_params_are_the_terrain_settings():
+    """Les réglages de classe `terrain` sont exactement ceux des cartes :
+    aucun n'est envoyé au shader, aucun n'est oublié par le calcul."""
+    kinds = {p.key for p in schema.PARAMS if p.kind == "terrain"}
+    assert kinds == set(terrain.SETTINGS)
+    assert set(terrain.DETAIL_SETTINGS) <= kinds
+    assert not any(schema.BY_KEY[k].shader or schema.BY_KEY[k].audio for k in kinds)
+
+
+def test_frame_carries_the_terrain_settings_after_macros():
+    f = run(BackgroundState(), settings(bg_m_complexity=1.0))
+    assert set(f.terrain) == set(terrain.SETTINGS)
+    assert f.terrain["bg_ld_octaves"] > schema.BY_KEY["bg_ld_octaves"].default
+
+
+def test_energy_macro_no_longer_touches_the_decor():
+    """L'Énergie amplifiait le flux et accélérait l'horloge du fond : elle ne
+    touche plus ni le relief ni la vitesse des mouvements propres."""
+    base = macros.apply(schema.defaults())
+    for m in (0.0, 1.0):
+        out = macros.apply(dict(schema.defaults(), bg_m_energy=m))
+        moved = {k for k in out if out[k] != base[k]}
+        assert moved and not any(schema.BY_KEY[k].group == "ld" for k in moved)
+        assert "bg_mov_speed" not in moved
+
+
+def test_decor_is_static_without_music_and_travel():
+    st = BackgroundState()
+    p = settings(bg_mov_travel=0.0, bg_mov_music=0.0)
+    a = run(st, p, LOUD, [1.0] * 11)
+    b = run(st, p, LOUD, [0.3] * 11, dt=0.5, steps=20)
+    assert same_uniforms(a.uniforms, b.uniforms)
 
 
 # ── macros ────────────────────────────────────────────────────────────
@@ -144,14 +212,13 @@ def test_draws_stay_in_their_range():
             assert a - 1e-9 <= v <= b + 1e-9 or (p.zero > 0 and v == 0.0), key
 
 
-def test_same_seed_same_chain_modes_included():
+def test_same_seed_same_landscape():
     a, b = schema.random_values(123), schema.random_values(123)
-    for key in ("bg_sp_mode", "bg_sh_a", "bg_sh_b", "bg_fu_combo", "bg_dx_axis"):
-        assert a[key] == b[key]
+    assert {k: a[k] for k in terrain.SETTINGS} == {k: b[k] for k in terrain.SETTINGS}
+    assert a["bg_ld_seed"] == float(int(a["bg_ld_seed"]))       # graine entière
 
 
-@pytest.mark.parametrize("key", ["bg_sp_mode", "bg_fu_combo", "bg_dx_axis",
-                                 "bg_nw_gen", "bg_nw_mode"])
+@pytest.mark.parametrize("key", ["bg_ld_vault", "bg_col_source"])
 def test_mode_weights_are_respected(key):
     p = schema.BY_KEY[key]
     n = 1000
@@ -162,20 +229,18 @@ def test_mode_weights_are_respected(key):
         assert share == pytest.approx(w / total, abs=0.05), (key, i)
 
 
-def test_effects_are_off_about_half_the_time():
+def test_terraces_and_volume_are_often_off():
     n = 1000
-    for key in ("bg_dx_twist", "bg_dx_warp_amp", "bg_dx_wave_amp", "bg_dx_bend"):
-        off = sum(schema.random_values(s, groups=["dx"])[key] == 0.0 for s in range(n))
-        assert off / n == pytest.approx(0.5, abs=0.05), key
-    no_sat = sum(schema.random_values(s, groups=["fu"])["bg_fu_count"] == 0.0
-                 for s in range(n))
-    assert no_sat / n == pytest.approx(0.4, abs=0.05)
+    for key, group, share in (("bg_ld_terrace", "ld", 0.6), ("bg_vo_caves", "vo", 0.5),
+                              ("bg_vo_bubbles", "vo", 0.6), ("bg_vo_twist", "vo", 0.7)):
+        off = sum(schema.random_values(s, groups=[group])[key] == 0.0 for s in range(n))
+        assert off / n == pytest.approx(share, abs=0.05), key
 
 
-def test_stage_lock_keeps_the_stage():
-    locked = schema.random_values(9, locked=["sp", "sh"])
-    assert not any(schema.BY_KEY[k].group in ("sp", "sh") for k in locked)
-    assert any(schema.BY_KEY[k].group == "fu" for k in locked)
+def test_group_lock_keeps_the_group():
+    locked = schema.random_values(9, locked=["ld", "col"])
+    assert not any(schema.BY_KEY[k].group in ("ld", "col") for k in locked)
+    assert any(schema.BY_KEY[k].group == "mat" for k in locked)
 
 
 def test_group_draw_matches_full_draw_and_respects_locks():
@@ -203,11 +268,12 @@ def test_no_music_means_no_dependence_on_audio():
 
 
 def test_music_reacts_but_kick_never_touches_structure():
-    p = settings(bg_mov_music=1.0)
+    p = settings(bg_mov_music=1.0, bg_col_flash=1.0)
     calm = run(BackgroundState(), p, LOUD, [0.0] * 11, steps=30)
     kick = [0.0] * 8 + [1.0, 1.0, 0.0]          # KICK + SNARE, pas d'ÉNERGIE
     hit = run(BackgroundState(), p, LOUD, kick, steps=30)
-    assert hit.uniforms["u_fu_spread"] > calm.uniforms["u_fu_spread"]  # exact : réagit
+    assert hit.uniforms["u_flash"] > calm.uniforms["u_flash"]    # flash sur la caisse claire
+    assert hit.terrain == calm.terrain
     for q in schema.PARAMS:
         if q.kind in schema.SLOW_ONLY and q.shader:
             assert hit.uniforms[q.uniform] == calm.uniforms[q.uniform], q.key
@@ -217,25 +283,24 @@ def test_slew_limits_structural_jumps():
     st = BackgroundState()
     run(st, settings())
     dt = 0.1
-    run(st, settings(bg_sp_period=12.0), dt=dt)
-    p = schema.BY_KEY["bg_sp_period"]
-    moved = st.values["bg_sp_period"] - p.default
+    run(st, settings(bg_ld_scale=50.0), dt=dt)
+    p = schema.BY_KEY["bg_ld_scale"]
+    moved = st.values["bg_ld_scale"] - p.default
     assert 0.0 < moved <= p.max_slew * dt + 1e-9
 
 
 def test_first_frame_is_not_slewed():
     st = BackgroundState()
-    run(st, settings(bg_sp_period=12.0))
-    assert st.values["bg_sp_period"] == 12.0
+    run(st, settings(bg_ld_scale=50.0))
+    assert st.values["bg_ld_scale"] == pytest.approx(50.0)
 
 
 @pytest.mark.slow
 def test_motion_stays_bounded_over_a_long_session():
     st = BackgroundState()
-    p = settings(bg_mov_speed=4.0, bg_mov_rot=1.0, bg_col_cycle=1.0)
+    p = settings(bg_mov_speed=4.0, bg_mov_rot=1.0)
     run(st, p, dt=1.0, steps=3600)
     assert 0.0 <= st.angle < 2.0 * math.pi
-    assert 0.0 <= st.hue_phase < 1.0
 
 
 def test_the_object_travels_through_a_fixed_decor():
@@ -253,10 +318,9 @@ def test_the_object_travels_through_a_fixed_decor():
 
 def test_default_direction_goes_into_the_screen():
     assert np.allclose(travel_dir(schema.defaults()), (0.0, 0.0, -1.0))
-    climbing = dict(schema.defaults(), bg_mov_dir_el=45.0)
-    assert travel_dir(climbing)[1] > 0.5
-    ground = dict(climbing, bg_sp_mode=2.0)            # Grille au sol : le sol reste au sol
-    assert travel_dir(ground)[1] == 0.0
+    for az in (0.0, 90.0, 217.0):                      # le sol reste au sol
+        d = travel_dir(dict(schema.defaults(), bg_mov_dir_az=az))
+        assert d[1] == 0.0 and np.linalg.norm(d) == pytest.approx(1.0)
 
 
 def test_beats_are_counted_when_music_may_act():
@@ -271,9 +335,9 @@ def test_beats_are_counted_when_music_may_act():
 def test_freeze_stops_time():
     st = BackgroundState()
     run(st, settings(), steps=10)
-    t, clock = st.time, st.clock
+    travel, clock = st.travel.copy(), st.clock
     run(st, settings(bg_mov_freeze=1.0), steps=10)
-    assert (st.time, st.clock) == (t, clock)
+    assert np.array_equal(st.travel, travel) and st.clock == clock
 
 
 def test_hidden_frame_and_solid_color():
@@ -296,16 +360,19 @@ def test_same_space_and_model_light_by_default():
 
 
 # ── recettes ──────────────────────────────────────────────────────────
-def test_recipes_are_new_chains_in_range():
+def test_recipes_are_landscapes_in_range():
     assert len(schema.AMBIANCES) >= 8
-    modes = set()
+    assert {"Planète inconnue", "Canyon voûté"} <= set(schema.AMBIANCES)
     for name, vals in schema.AMBIANCES.items():
         for k, v in vals.items():
             p = schema.BY_KEY[k]
             assert p.lo <= v <= p.hi, (name, k)
         assert vals["bg_visible"] == 1.0
-        modes.add(vals.get("bg_sp_mode", schema.BY_KEY["bg_sp_mode"].default))
-    assert len(modes) == len(schema.SPACE_MODES)       # chaque Espace a sa recette
+    vals = list(schema.AMBIANCES.values())
+    assert any(v.get("bg_vo_cave_mode", 0.0) == 1.0 for v in vals)  # une caverne
+    assert any(v.get("bg_vo_bubbles", 0.0) > 0 for v in vals)       # des bulles
+    assert any(v.get("bg_ld_vault", 0.0) > 0 for v in vals)        # un canyon voûté
+    assert any(v.get("bg_ld_terrace", 0.0) > 0.5 for v in vals)    # des terrasses
 
 
 def test_recipes_render_without_error():
@@ -315,14 +382,14 @@ def test_recipes_render_without_error():
                    for v in f.uniforms.values())
 
 
-# ── macros de forme sur les étages ────────────────────────────────────
+# ── macros du paysage ─────────────────────────────────────────────────
 @pytest.mark.parametrize("name", [n for n, *_ in schema.MACROS_FORM])
-def test_form_macros_move_a_stage(name):
+def test_landscape_macros_move_the_landscape(name):
     base = macros.apply(schema.defaults())
-    stage = {"sp", "dx", "sh", "fu", "mat"}
     for m in (0.0, 1.0):
         out = macros.apply(dict(schema.defaults(), **{f"bg_m_{name}": m}))
-        moved = [k for k in out if out[k] != base[k] and schema.BY_KEY[k].group in stage]
+        moved = [k for k in out if out[k] != base[k]
+                 and schema.BY_KEY[k].group in ("ld", "vo")]
         assert moved, (name, m)
 
 
@@ -332,121 +399,10 @@ def test_kick_and_snare_never_reach_structure():
             assert p.kind not in ("topology", "int", "deform"), p.key
 
 
-def test_zero_dose_means_no_audio_on_the_chain():
-    p = settings(**schema.AMBIANCES["Essaim"], bg_mov_music=0.0)
-    a = run(BackgroundState(), p, QUIET, [0.0] * 11, steps=20)
-    b = run(BackgroundState(), p, LOUD, [1.0] * 11, steps=20)
-    for key in ("u_fu_spread", "u_sh_morph", "u_dx_wave_amp", "u_fu_k", "u_sh_wave"):
-        assert a.uniforms[key] == b.uniforms[key], key
-
-
-# ── portée et étirement (aucune forme tranchée, pas raccourcis) ───────
-def test_reach_grows_with_size_stretch_and_satellites():
-    v = macros.apply(schema.defaults())
-    base = params.shape_reach(v)[0]
-    assert params.shape_reach(dict(v, bg_sh_sx=2.5))[0] > base
-    assert params.shape_reach(dict(v, bg_sh_size=0.4))[0] > base
-    assert params.shape_reach(dict(v, bg_fu_count=6.0, bg_fu_spread=2.0))[0] > base
-    full, horiz, vert = params.shape_reach(dict(v, bg_sp_mode=2.0, bg_sp_eq=1.0))
-    assert vert > horiz          # l'égaliseur étire vers le haut seulement
-
-
-def test_deform_stretch_is_one_without_deformation_and_grows():
-    v = macros.apply(schema.defaults())
-    assert params.deform_stretch(v) == 1.0
-    assert params.deform_stretch(dict(v, bg_dx_wave_amp=0.3)) > 1.0
-    assert params.deform_stretch(dict(v, bg_dx_warp_amp=1.5)) > \
-        params.deform_stretch(dict(v, bg_dx_warp_amp=0.5)) > 1.0
-
-
-def test_kifs_rotation_is_orthogonal():
-    for angle in (0.0, 20.0, 47.5, 90.0):
-        r = params.kifs_rotation(angle)
-        assert np.allclose(r @ r.T, np.eye(3)) and np.linalg.det(r) == pytest.approx(1.0)
-
-
-def test_kifs_copy_centre_is_found_through_the_folds():
-    """Le centre d'une copie calculé comme dans chain.glsl : replié, il
-    tombe exactement sur la forme (q = 0)."""
-    rot, s = params.kifs_rotation(15.0), 2.0
-    off = np.array([1.0, 1.0, 0.6]) * (s - 1.0)
-
-    def fold(p, n=4):
-        q, t = p.copy(), np.eye(3)
-        for _ in range(n):
-            sign = np.where(q >= 0.0, 1.0, -1.0)
-            q = np.abs(q)
-            t = (t * sign[None, :]) @ rot.T
-            q = s * (rot @ q) - off
-        return q, t
-
-    rng = np.random.default_rng(3)
-    for _ in range(200):
-        p = rng.uniform(-2.0, 2.0, 3)
-        q, t = fold(p)
-        centre = p - t @ q / s ** 4
-        assert np.allclose(fold(centre)[0], 0.0, atol=1e-9)
-
-
-def test_satellites_orbit_and_stay_unit():
-    st = BackgroundState()
-    p = settings(bg_fu_count=5.0, bg_fu_orbit=0.5)
-    a = np.asarray(run(st, p).uniforms["u_sat"]).reshape(-1, 3)
-    b = np.asarray(run(st, p, dt=1.0, steps=10).uniforms["u_sat"]).reshape(-1, 3)
-    assert np.allclose(np.linalg.norm(a[:5], axis=1), 1.0)
-    assert np.allclose(a[5:], 0.0)
-    assert not np.allclose(a[:5], b[:5])
-
-
-# ── monde de bruit (passe 4) ──────────────────────────────────────────
-def test_world_recipes_cover_every_world():
-    worlds = {vals.get("bg_nw_mode", 0.0) for vals in schema.AMBIANCES.values()
-              if vals.get("bg_nw_gen") == 1.0}
-    assert worlds == set(map(float, range(len(schema.WORLD_MODES))))
-    # les recettes de formes restent en formes répétées (défaut)
-    assert schema.BY_KEY["bg_nw_gen"].default == 0.0
-
-
-def test_cave_threshold_leaves_the_asked_share_of_rock():
-    values = (noise.texture()[..., 0].astype(float) - 0.5) * 2.0
-    for fill in (0.3, 0.5, 0.7):
-        thr = noise.centered_quantile(1.0 - fill)
-        assert (values > thr).mean() == pytest.approx(fill, abs=0.01)
-    assert noise.centered_quantile(0.2) < noise.centered_quantile(0.8)
-
-
-def test_world_slope_bounds_the_noise():
-    gn = noise.max_gradient_norm()
-    assert 0.0 < gn < 0.5
-    c = params.world_constants(macros.apply(schema.defaults()))
-    assert c["u_nw_G"] == pytest.approx(16.0 * gn)
-    calm = params.world_constants(dict(macros.apply(schema.defaults()), bg_nw_warp=0.0))
-    assert calm["u_nw_warpL"] == 0.0 < c["u_nw_warpL"]
-
-
-def test_world_layers_flow_and_freeze():
-    p = settings(bg_nw_gen=1.0, bg_nw_flow=0.5)
-    st = BackgroundState()
-    a = np.asarray(run(st, p).uniforms["u_nw_flow2"])
-    b = np.asarray(run(st, p, dt=1.0, steps=4).uniforms["u_nw_flow2"])
-    assert np.linalg.norm(b - a) == pytest.approx(0.5 * params.FLOW_SPEEDS[1] * 4.0, rel=1e-6)
-    frozen = np.asarray(run(st, dict(p, bg_mov_freeze=1.0), steps=10).uniforms["u_nw_flow2"])
-    assert np.allclose(frozen, b)
-    # les trois couches ne glissent pas dans la même direction
-    d = [v / np.linalg.norm(v) for v in params.FLOW_DIRS]
-    assert abs(d[0] @ d[1]) < 0.9 and abs(d[1] @ d[2]) < 0.9
-
-
-def test_landscape_travels_horizontally():
-    climbing = dict(schema.defaults(), bg_mov_dir_el=40.0, bg_nw_gen=1.0, bg_nw_mode=2.0)
-    assert travel_dir(climbing)[1] == 0.0
-    cave = dict(climbing, bg_nw_mode=0.0)
-    assert travel_dir(cave)[1] > 0.5
-
-
-def test_world_detail_follows_the_world_size():
-    small = run(BackgroundState(), settings(bg_nw_gen=1.0, bg_nw_scale=8.0))
-    big = run(BackgroundState(), settings(bg_nw_gen=1.0, bg_nw_scale=40.0))
+def test_landscape_travels_horizontally_and_detail_follows_the_size():
+    assert travel_dir(dict(schema.defaults(), bg_mov_dir_az=33.0))[1] == 0.0
+    small = run(BackgroundState(), settings(bg_ld_scale=8.0))
+    big = run(BackgroundState(), settings(bg_ld_scale=40.0))
     assert big.uniforms["u_detail"] > small.uniforms["u_detail"]
 
 
@@ -460,7 +416,7 @@ def test_noise_texture_is_deterministic_bounded_and_periodic():
     inner = np.abs(np.diff(tex, axis=2)).max()
     seam = np.abs(tex[:, :, 0] - tex[:, :, -1]).max()
     assert seam <= inner * 1.05
-    assert 0.0 < noise.max_gradient(tex) < 0.5          # lisse
+    assert 0.0 < inner < 0.5                            # lisse
 
 
 # ── palettes ──────────────────────────────────────────────────────────
@@ -511,13 +467,6 @@ def test_fog_takes_the_palette_colour_at_the_same_luminance():
     a = run(st, settings(bg_comp_fog_tint=0.0)).uniforms["u_hor_col"]
     b = run(BackgroundState(), settings(bg_comp_fog_tint=1.0)).uniforms["u_hor_col"]
     assert not np.allclose(a, b)
-
-
-def test_wave_stretch_accounts_for_the_chained_ripples():
-    v = macros.apply(schema.defaults())
-    w = dict(v, bg_dx_wave_amp=0.2, bg_dx_wave_len=4.0)
-    ka = 2.0 * math.pi * 0.2 * v["bg_sp_period"] / 4.0
-    assert params.deform_stretch(w) >= (1.0 + ka) * (1.0 + 0.73 * ka)
 
 
 def test_materials_set_their_reflections():

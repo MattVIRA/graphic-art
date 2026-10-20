@@ -6,11 +6,15 @@ le niveau Moyen et baisse la résolution du fond par crans quand le temps
 GPU mesuré dépasse le budget, puis la remonte quand il y a de la marge.
 """
 
-# niveaux Bas, Moyen et Haut ; Auto utilise le niveau Moyen
+# niveaux Bas, Moyen et Haut ; Auto utilise le niveau Moyen. Les ombres du
+# relief vont loin (une montagne sur la vallée) : plus de pas qu'avant, chacun
+# ne lit que les cartes de hauteur. La marche aussi : le Volume (warp,
+# cavités) raccourcit les pas, à 128 les rayons rasants s'épuisaient en
+# stries au loin ; seuls les rayons qui en ont besoin vont jusqu'au bout
 LEVELS = [
-    {"MAX_STEPS": 72, "SHADOW_STEPS": 0, "AO_SAMPLES": 0, "HIT_PIX": 3.0},
-    {"MAX_STEPS": 128, "SHADOW_STEPS": 12, "AO_SAMPLES": 3, "HIT_PIX": 1.0},
-    {"MAX_STEPS": 192, "SHADOW_STEPS": 32, "AO_SAMPLES": 5, "HIT_PIX": 1.0},
+    {"MAX_STEPS": 96, "SHADOW_STEPS": 0, "AO_SAMPLES": 0, "HIT_PIX": 3.0},
+    {"MAX_STEPS": 192, "SHADOW_STEPS": 24, "AO_SAMPLES": 3, "HIT_PIX": 1.0},
+    {"MAX_STEPS": 288, "SHADOW_STEPS": 40, "AO_SAMPLES": 5, "HIT_PIX": 1.0},
 ]
 AUTO = 3
 BUDGET_MS = 2.0          # temps GPU visé pour le fond

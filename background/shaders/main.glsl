@@ -7,17 +7,31 @@ in vec2 v_uv;
 out vec4 f_color;
 
 // point du monde (unités du fond) → distance, après rotation propre,
-// défilement et échelle ; le vide central est fait d'instances réduites
-// (voir chain.glsl), jamais d'une forme tranchée
+// voyage et échelle (landscape.glsl : le paysage)
 float scene(vec3 pw) {
     vec3 q = u_rot * pw + u_offset;
     return map(q / u_scale) * u_scale;
 }
 
-// brume de distance (perspective atmosphérique) ; un détail plus fin que
-// ~3 pixels s'y fond aussi : pas de grain ni de moiré (zébrures) au loin
+// rayon de la brume (posé par main() avant la marche) : hauteur de départ
+// au-dessus du fond de la vallée et montée par unité de rayon (espace des
+// formes)
+float g_fog_h0 = 0.0, g_fog_dy = 0.0;
+
+// brume de distance (perspective atmosphérique), plus dense en bas : elle
+// remplit les vallées et laisse les sommets nets, le relief se lit par
+// plans. Densité exp(−h / hauteur), intégrée exactement le long du rayon,
+// + une part uniforme qui efface l'horizon. Avant : une brume uniforme
+// deux fois plus dense, plus sombre que le relief — tout noircissait à
+// une vingtaine d'unités. Un détail plus fin que ~3 pixels s'y fond aussi
+// (pas de grain ni de moiré au loin).
 float haze(float t) {
-    float fog = 1.0 - exp(-u_comp_fade * t * 0.06);
+    float hs = max(u_comp_fog_height * relief_height(), 0.5 / u_scale);
+    float a = g_fog_dy / (u_scale * hs);
+    float at = max(a * t, -10.0);
+    float path = abs(at) < 1e-4 ? t : (1.0 - exp(-at)) / a;
+    float tau = u_comp_fade * (0.03 * exp(-max(g_fog_h0, -hs) / hs) * path + 0.006 * t);
+    float fog = 1.0 - exp(-tau);
     float px = u_detail / max(t * u_pix, 1e-6);
     return max(fog, 1.0 - smoothstep(2.5, 8.0, px));
 }
@@ -60,19 +74,33 @@ vec4 normal_curv(vec3 p, float e) {
     return vec4(normalize(n), abs(s) / e);
 }
 
+// ombre portée du relief : les pas grandissent avec la distance, une
+// montagne lointaine (jusqu'à 3 tailles du monde) peut couvrir la vallée
 float soft_shadow(vec3 o, vec3 l, float k) {
 #if SHADOW_STEPS > 0
     float res = 1.0, t = 0.05;
+    float far = 3.0 * u_ld_scale * u_scale;
     for (int i = u_zero; i < SHADOW_STEPS; i++) {
         float h = scene(o + l * t);
         res = min(res, k * h / t);
-        t += clamp(h, 0.05, 0.8);
-        if (res < 0.01 || t > 12.0) break;
+        t += clamp(h, 0.04 + 0.02 * t, far / 8.0);
+        if (res < 0.01 || t > far) break;
     }
     return clamp(res, 0.0, 1.0);
 #else
     return 1.0;
 #endif
+}
+
+// ombre de l'objet sur le décor : une sphère à sa place (unités du fond,
+// monde), pénombre plus large quand l'objet est loin du point éclairé
+float model_shadow(vec3 p, vec3 l) {
+    vec3 oc = u_model_c - p;
+    float b = dot(oc, l);
+    if (b <= 0.0) return 1.0;
+    float dist = sqrt(max(dot(oc, oc) - b * b, 0.0));
+    float pen = u_model_r * 0.25 + b * 0.06;
+    return smoothstep(u_model_r - pen, u_model_r + pen, dist);
 }
 
 float occlusion(vec3 p, vec3 n, float steps_frac) {
@@ -151,13 +179,21 @@ vec3 bump(vec3 ps, vec3 n, float fine) {
     return normalize(n - (g - dot(g, n) * n));
 }
 
-// veines lumineuses : crêtes du bruit (là où il passe par 0,5), qui
-// glissent lentement dans le décor
+// veines lumineuses : crêtes du bruit (là où il passe par 0,5), figées dans
+// le décor (elles glissaient : une couleur qui se propageait)
 float veins(vec3 ps, float fine) {
     if (u_mat_veins <= 0.0) return 0.0;
-    float v = noise3(ps + vec3(0.0, u_time * 0.03, u_time * 0.017), u_mat_veins_size, 1);
+    float v = noise3(ps, u_mat_veins_size, 1);
     float w = u_mat_veins_width * 0.25;
     return u_mat_veins * (1.0 - smoothstep(0.0, w, abs(v - 0.5))) * (0.3 + 0.7 * fine);
+}
+
+// ombre portée (relief + objet) au point pos, dosée par « Dureté des ombres »
+float cast_shadow(vec3 pos, vec3 lift, vec3 L) {
+    if (u_light_shadow <= 0.01) return 1.0;
+    float s = soft_shadow(pos + lift, L, mix(2.0, 24.0, u_light_shadow))
+            * model_shadow(pos, L);
+    return mix(1.0, s, min(u_light_shadow * 2.0, 1.0));
 }
 
 vec3 shade(vec3 pos, vec3 rd, float t, float tmax, float steps_frac) {
@@ -167,20 +203,19 @@ vec3 shade(vec3 pos, vec3 rd, float t, float tmax, float steps_frac) {
     // et irisation s'effacent au lieu de scintiller
     float sharp = smoothstep(2.0, 8.0, u_detail * px);
     vec3 ps = (u_rot * pos + u_offset) / u_scale;   // espace des formes (fixe)
+    vec3 m = scene_material(pos);
     float fine = smoothstep(3.0, 10.0, u_mat_bump_size * u_scale * px);
     vec4 nc = normal_curv(pos, e);
     vec3 n = nc.xyz;
-    vec3 m = scene_material(pos);
-    float ao = pow(occlusion(pos, n, steps_frac), u_mat_ao);
+    // occlusion : creux du relief précalculés (toutes échelles) × creux
+    // proches mesurés autour du point (flancs de la vallée, voûte)
+    float ao = pow(occlusion(pos, n, steps_frac) * terrain_occlusion(ps), u_mat_ao);
     vec3 alb = albedo(ps, n, t, tmax, m, ao, fine);
     n = bump(ps, n, fine * sharp);
     vec3 L = normalize(u_sun_dir);
     vec3 V = -rd;
     float ndl = dot(n, L);
-    float sh = 1.0;
-    if (u_light_shadow > 0.01 && ndl > 0.0)
-        sh = mix(1.0, soft_shadow(pos + nc.xyz * 2.0 * e, L, mix(2.0, 24.0, u_light_shadow)),
-                 min(u_light_shadow * 2.0, 1.0));
+    float sh = ndl > 0.0 ? cast_shadow(pos, nc.xyz * 2.0 * e, L) : 1.0;
     float w = u_mat_transl;
     float dif = clamp((ndl + w) / (1.0 + w), 0.0, 1.0) * sh;
     float sky = clamp(0.5 + 0.5 * n.y, 0.0, 1.0) * ao;
@@ -208,9 +243,9 @@ vec3 shade(vec3 pos, vec3 rd, float t, float tmax, float steps_frac) {
     vec3 lc = -pos;
     float dc = length(lc);
     col += diff * u_center_col * clamp(dot(n, lc / dc), 0.0, 1.0) / (1.0 + dc * dc * 0.08);
-    // émission : matière propre, joints, arêtes (courbure), veines, flash
+    // émission : matière propre, arêtes (courbure), veines, flash (global)
     float edge = smoothstep(0.15, 0.8, nc.w) * u_edges * sharp;
-    col += alb * u_mat_emit * 2.0 + u_emit_col * (m.z + edge + veins(ps, fine) + u_flash);
+    col += alb * u_mat_emit * 2.0 + u_emit_col * (edge + veins(ps, fine) + u_flash);
     return col;
 }
 
@@ -267,6 +302,8 @@ void main() {
     // comme un paysage lointain
     vec3 ro = eye * (1.0 - u_comp_far);
     g_eye_s = (u_rot * ro + u_offset) / u_scale;
+    g_fog_h0 = g_eye_s.y - floor_level();
+    g_fog_dy = (u_rot * rd).y;
     float tmin = 0.0;
     float tmax = u_comp_horizon;
     float view = max(dot(rd, u_fwd), 1e-3);       // px de visée par unité de rayon / unit
@@ -289,10 +326,14 @@ void main() {
         }
         prev = ar;
         glow += 0.01 / (1.0 + ar * ar * 400.0);
-        if (!fail && ar < HIT_PIX * u_pix * t) { hit = true; break; }
+        // tolérance de contact : un pixel de près, plus dans la brume (un
+        // relief à moitié fondu n'a pas besoin d'être touché au pixel près ;
+        // sans cela, les rayons rasants rampaient jusqu'à l'horizon)
+        float fog = haze(t);
+        if (!fail && ar < HIT_PIX * u_pix * t * (1.0 + 6.0 * fog)) { hit = true; break; }
         t += step_len;
         if (t < tmin) { t = tmin; hit = true; break; }   // départ dans une forme
-        if (t > tmax || haze(t) > 0.96) break;     // perdu dans la brume
+        if (t > tmax || fog > 0.93) break;         // perdu dans la brume
     }
     float steps_frac = float(i) / float(MAX_STEPS);
     // pas épuisés (rayon rasant, détail lointain) : le pixel prend la

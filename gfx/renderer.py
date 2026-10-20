@@ -692,6 +692,7 @@ NEAR, FAR = 10.0, 8000.0   # plans de la projection (px du monde)
 # l'emprunter pour être éclairé comme le modèle (T16)
 KEY_LIGHT_DIR = np.array([-0.55, 0.65, 0.55]) / np.linalg.norm([-0.55, 0.65, 0.55])
 KEY_LIGHT_COLOR = np.array([3.2, 2.95, 2.7])
+MODEL_SHADOW_R = 0.85    # ombre du modèle sur le fond (T16), en rayons du modèle
 
 
 class GLRenderer:
@@ -801,6 +802,8 @@ class GLRenderer:
 
         # ── Rotation-axis indicator (green line, updated in set_transform) ──
         self._axis_dir = (0.0, 1.0, 0.0)
+        self._model_center = np.zeros(3)   # T16 : ombre du modèle sur le fond
+        self._model_scale = 1.0
         self._axis_vbo = ctx.buffer(reserve=2 * 3 * 4)
         self._axis_vao = ctx.vertex_array(
             self.line_prog, [(self._axis_vbo, "3f", "in_pos")])
@@ -938,6 +941,9 @@ class GLRenderer:
                  @ _translate(orbit_dist, 0.0, 0.0)
                  @ _rotate_x(obj_tilt)
                  @ _scale(scale))
+        # T16 : centre et taille du modèle, pour son ombre sur le fond
+        self._model_center = model[:3, 3].copy()
+        self._model_scale = float(scale)
         mv = self._view @ model
         mvp = self._proj @ mv
         # GL expects column-major → transpose the row-major numpy matrix
@@ -1233,6 +1239,10 @@ class GLRenderer:
             "u_near_far": (NEAR, FAR),
             "u_fwd": tuple(-view[2, :3]),
             "u_same_space": 1.0 if frame.same_space else 0.0,
+            # l'objet projette son ombre : une sphère un peu plus petite que
+            # sa sphère englobante (rayon 1 unité)
+            "u_model_c": tuple(float(c) for c in self._model_center / unit),
+            "u_model_r": MODEL_SHADOW_R * self._model_scale,
         }
         if frame.light_model:
             # même lumière que le modèle : la lumière principale du Studio,

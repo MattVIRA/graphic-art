@@ -185,19 +185,6 @@ def test_max_weight():
     assert temporal.max_weight(0.7) == pytest.approx(16.19)
     ws = [temporal.max_weight(s) for s in np.linspace(0.05, 1.0, 20)]
     assert all(b > a for a, b in zip(ws, ws[1:], strict=False))
-    # un décor animé garde moins d'historique, jamais sous le plancher
-    assert temporal.max_weight(0.7, 2.0) < temporal.max_weight(0.7, 0.0)
-    assert temporal.max_weight(0.7, 1e6) == temporal.MIN_HISTORY
-
-
-def test_animation_of_the_default_and_frozen_decor():
-    v = schema.defaults()
-    assert temporal.animation(v) == 0.0                 # défauts : rien n'anime
-    v.update(bg_fu_count=6.0, bg_fu_orbit=0.3, bg_nw_gen=1.0, bg_nw_flow=0.2)
-    assert temporal.animation(v) > 1.0
-    assert temporal.animation(dict(v, bg_mov_freeze=1.0)) == 0.0
-    assert temporal.animation(dict(v, bg_mov_speed=2.0)) == pytest.approx(
-        2.0 * temporal.animation(v))
 
 
 def test_frame_carries_the_history_weight():

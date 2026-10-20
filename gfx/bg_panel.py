@@ -11,7 +11,7 @@ from tkinter import ttk
 
 from background import schema
 
-OPEN_GROUPS = ("nw", "sp", "sh")   # dépliés à l'ouverture
+OPEN_GROUPS = ("ld", "vo")   # dépliés à l'ouverture
 
 
 def _widget(parent, ui, p):
@@ -29,13 +29,13 @@ def _locked(ui) -> list:
 
 
 def _new_shape(ui, seed=None):
-    """🎲 Nouvelle forme : tout ce qui n'est pas verrouillé, tiré d'un seed."""
+    """🎲 Nouveau paysage : tout ce qui n'est pas verrouillé, tiré d'un seed."""
     if seed is None:
         seed = random.randrange(10000)
     vals = schema.random_values(seed, locked=_locked(ui))
     vals.update(bg_seed=float(seed), bg_visible=1.0)
     ui.apply(vals)
-    ui.status(f"Fond : nouvelle forme (seed {seed})")
+    ui.status(f"Fond : nouveau paysage (seed {seed})")
 
 
 def _group_dice(ui, group, title):
@@ -79,12 +79,12 @@ def _top(tab, ui):
             _widget(tab, ui, p)
     row = ttk.Frame(tab)
     row.pack(fill="x", padx=10, pady=(8, 0))
-    ttk.Button(row, text="🎲  Nouvelle forme", command=lambda: _new_shape(ui)
+    ttk.Button(row, text="🎲  Nouveau paysage", command=lambda: _new_shape(ui)
                ).pack(side="left", fill="x", expand=True)
     replay = ttk.Button(row, text="↻  Rejouer le seed",
                         command=lambda: _new_shape(ui, int(ui.scales["bg_seed"].get())))
     replay.pack(side="left", fill="x", expand=True, padx=(4, 0))
-    ui.tooltip(replay, "Retrouve la forme tirée avec ce seed\n(groupes verrouillés exceptés)")
+    ui.tooltip(replay, "Retrouve le paysage tiré avec ce seed\n(groupes verrouillés exceptés)")
     _widget(tab, ui, schema.BY_KEY["bg_seed"])
 
 

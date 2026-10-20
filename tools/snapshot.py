@@ -6,10 +6,10 @@ comparer la qualité d'image avant / après une modification du renderer.
     python tools/snapshot.py --visual primitive:torus --tag avant
     python tools/snapshot.py --visual inputs/3D_models/x/scene.gltf
     python tools/snapshot.py --orbit 40,25 --grid   # caméra orbitale (T26)
-    python tools/snapshot.py --bg-recipe Hélices    # fond SDF (T16) : une recette
-    python tools/snapshot.py --seed 42 --style surface   # chaîne tirée au dé
-    python tools/snapshot.py --bg-recipe Essaim --bg-set bg_comp_void=3   # + un réglage
-    python tools/snapshot.py --bg-recipe Hélices --orbit 30,10 --orbit-speed 12,3 \
+    python tools/snapshot.py --bg-recipe Dunes     # fond (T16) : un paysage intégré
+    python tools/snapshot.py --seed 42 --style surface   # paysage tiré au dé
+    python tools/snapshot.py --bg-recipe Collines --bg-set bg_vo_caves=0.6   # + un réglage
+    python tools/snapshot.py --bg-recipe Dunes --orbit 30,10 --orbit-speed 12,3 \
         --frames 120 --save-every 30      # caméra qui tourne, plusieurs frames (passe 5)
 
 Sortie : captures/bench/<tag>/<scène>.png (+ temps GPU moyen par frame).
@@ -145,13 +145,13 @@ def main():
                     help="enregistre aussi une frame toutes les N (_fNNN.png)")
     ap.add_argument("--grid", action="store_true", help="dessiner la grille")
     ap.add_argument("--bg-recipe", default=None, metavar="NOM",
-                    help="fond SDF (T16) : une recette intégrée ("
+                    help="fond (T16) : un paysage intégré ("
                          + ", ".join(bg_schema.AMBIANCES) + ")")
     ap.add_argument("--seed", type=int, default=None,
-                    help="fond SDF : chaîne tirée au dé (après la recette s'il y en a une)")
+                    help="fond : paysage tiré au dé (après la recette s'il y en a une)")
     ap.add_argument("--bg-quality", type=int, default=1, help="0 Bas, 1 Moyen, 2 Haut")
     ap.add_argument("--bg-set", action="append", default=[], metavar="CLÉ=VALEUR",
-                    help="un réglage du fond (répétable), ex. bg_comp_void=1.2")
+                    help="un réglage du fond (répétable), ex. bg_ld_valley=3")
     ap.add_argument("--style", action="append", choices=STYLES, default=None,
                     help="styles rendus (répétable) ; défaut : les trois")
     args = ap.parse_args()
@@ -186,7 +186,8 @@ def main():
         for item in args.bg_set:
             key, value = item.split("=")
             p[key] = float(value)
-        decor = Decor(ctx, report=lambda msg, exc=None: print(msg, exc or ""))
+        decor = Decor(ctx, report=lambda msg, exc=None: print(msg, exc or ""),
+                      sync_terrain=True)
     for vis in args.visual or ["primitive:torus"]:
         particles = ModelSource(W, H)
         name = os.path.splitext(os.path.basename(vis.replace("primitive:", "")))[0]

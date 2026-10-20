@@ -1,9 +1,9 @@
 """Passe GL du fond (T16) : un programme par niveau de qualité, tous
 compilés au démarrage (pas de binaires de programme fiables sur macOS :
-compiler en cours de route ferait une saccade). La chaîne d'étages choisit
-ses opérations par uniforms : changer de mode ne recompile rien. Plus une
-texture HDR à la résolution du fond, une palette 1D, la texture 3D de
-bruit du warp et la mesure du temps GPU. Passe 5 : le rayon est décalé
+compiler en cours de route ferait une saccade). Plus une texture HDR à la
+résolution du fond, une palette 1D, la texture 3D de bruit de la matière,
+les deux cartes du relief (background/terrain.py, remplacées quand un
+nouveau calcul est prêt) et la mesure du temps GPU. Passe 5 : le rayon est décalé
 d'une fraction de pixel à chaque frame, puis `resolve.glsl` mélange la
 frame à l'historique reprojeté (ping-pong à la résolution interne) et
 l'agrandit en suivant les contours (`background/temporal.py`).
@@ -20,15 +20,16 @@ import time
 import moderngl
 import numpy as np
 
-from background import noise, palettes, quality, schema, temporal
+from background import noise, palettes, quality, schema, temporal, terrain
 
 log = logging.getLogger(__name__)
 
 SHADER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shaders")
-SHADER_FILES = ["common.glsl", "chain.glsl", "main.glsl"]   # dans cet ordre
+SHADER_FILES = ["common.glsl", "landscape.glsl", "main.glsl"]   # dans cet ordre
 RESOLVE_FILE = "resolve.glsl"            # passe 5 : accumulation + agrandissement
 PALETTE_UNIT, NOISE_UNIT = 3, 6          # 4 et 5 : scène et profondeur (renderer)
 CUR_UNIT, HIST_UNIT, HIST_AUX_UNIT = 7, 8, 9
+TERRAIN_UNIT, FINE_UNIT = 10, 11         # cartes du relief
 
 FULLSCREEN_VS = """
 #version 330
@@ -71,6 +72,10 @@ class BackgroundPass:
                                        dtype="f4")
         self.noise_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
         self.noise_tex.repeat_x = self.noise_tex.repeat_y = self.noise_tex.repeat_z = True
+        self.terrain_tex = self.fine_tex = None
+        self.terrain_rev = 0
+        self._terrain_uniforms = {}
+        self.set_terrain(terrain.flat())  # plaine, le temps du premier calcul
         self.tex = self.fbo = None
         # passe 5 : historique ping-pong à la résolution interne (couleur +
         # part devant le modèle ; poids + profondeur)
@@ -120,10 +125,39 @@ class BackgroundPass:
     def _bind_textures(self):
         self.palette_tex.use(PALETTE_UNIT)
         self.noise_tex.use(NOISE_UNIT)
+        self.terrain_tex.use(TERRAIN_UNIT)
+        self.fine_tex.use(FINE_UNIT)
+
+    def _map_texture(self, data: np.ndarray):
+        """Carte du relief : float32 bouclée, mipmaps (lissée au loin)."""
+        h, w = data.shape[:2]
+        comps = 1 if data.ndim == 2 else data.shape[2]
+        tex = self.ctx.texture((w, h), comps, np.ascontiguousarray(data).tobytes(),
+                               dtype="f4")
+        tex.repeat_x = tex.repeat_y = True
+        tex.build_mipmaps()
+        tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        return tex
+
+    def set_terrain(self, maps):
+        """Installe les cartes calculées (background.terrain.TerrainMap) ;
+        l'historique du lissage repart de zéro (le décor a changé)."""
+        for tex in (self.terrain_tex, self.fine_tex):
+            if tex is not None:
+                tex.release()
+        self.terrain_tex = self._map_texture(maps.data)
+        self.fine_tex = self._map_texture(maps.detail)
+        self._terrain_uniforms = {
+            "u_ld_res": (float(maps.data.shape[0]), float(maps.detail.shape[0])),
+            "u_ld_slope": maps.slope, "u_ld_dslope": maps.detail_slope,
+            "u_ld_dgain": maps.detail_gain, "u_ld_damp": maps.detail_amp,
+        }
+        self.terrain_rev += 1
 
     @staticmethod
     def _set_samplers(prog):
         for name, unit in (("u_palette", PALETTE_UNIT), ("u_noise", NOISE_UNIT),
+                           ("u_terrain", TERRAIN_UNIT), ("u_terrain_fine", FINE_UNIT),
                            ("u_cur", CUR_UNIT), ("u_hist", HIST_UNIT),
                            ("u_hist_aux", HIST_AUX_UNIT), ("u_model_depth", 5)):
             if name in prog._members:
@@ -211,7 +245,7 @@ class BackgroundPass:
         out_size = temporal.history_size(size, out_size)
         self._history_targets(out_size)
         prev, n = self.history.step((size, frame.quality, frame.same_space,
-                                     frame.structure), pose)
+                                     frame.structure, self.terrain_rev), pose)
         wmax = float(frame.history)
         jit = temporal.jitter(n) if wmax > 0.0 else (0.0, 0.0)
 
@@ -219,7 +253,8 @@ class BackgroundPass:
         if frame.palette_rev != self._palette_rev and frame.palette is not None:
             self.palette_tex.write(np.ascontiguousarray(frame.palette, dtype="f4").tobytes())
             self._palette_rev = frame.palette_rev
-        self._write(prog, dict(frame.uniforms, **camera, u_jitter=jit))
+        self._write(prog, dict(frame.uniforms, **camera, **self._terrain_uniforms,
+                               u_jitter=jit))
         if "u_zero" in prog._members:
             prog["u_zero"].value = 0
         self._set_samplers(prog)
