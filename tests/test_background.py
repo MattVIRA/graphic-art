@@ -424,6 +424,51 @@ def test_harmony_targets_the_model_hue():
     assert palettes.mean_hue(red) == pytest.approx(0.0, abs=1e-6)
 
 
+def test_palette_is_read_without_mirror_or_repeat():
+    """Passe 3 : plus de « Répétition de la palette » ni de lecture en
+    miroir (les bandes de dégradé qui alternaient)."""
+    assert "bg_col_repeat" not in schema.BY_KEY
+    main = open(os.path.join(SHADER_DIR, "main.glsl"), encoding="utf-8").read()
+    assert "x = clamp(x, 0.0, 1.0);" in main and "fract(x * 0.5)" not in main
+    assert schema.BY_KEY["bg_col_steps"].rand is None      # paliers jamais tirés
+    assert "Nappes de bruit" in schema.COLOR_SOURCES
+    assert schema.COLOR_SOURCES[int(schema.BY_KEY["bg_col_source"].default)] == \
+        "Nappes de bruit"
+
+
+def test_hue_rotate_matches_the_shader_and_keeps_grey():
+    grey = np.array([0.3, 0.3, 0.3])
+    assert np.allclose(palettes.hue_rotate(grey, 1.3), grey)
+    red = np.array([1.0, 0.0, 0.0])
+    assert np.allclose(palettes.hue_rotate(red, 2.0 * math.pi), red)
+    assert np.allclose(palettes.hue_rotate(red, 2.0 * math.pi / 3.0), [0.0, 1.0, 0.0],
+                       atol=1e-9)
+
+
+def test_fog_takes_the_palette_colour_at_the_same_luminance():
+    horizon = np.array([0.02, 0.02, 0.05])
+    pal = np.tile([0.8, 0.3, 0.1], (palettes.SIZE, 1))     # palette orangée
+    assert np.allclose(palettes.fog_color(horizon, pal, 0.0, 0.0), horizon)
+    full = palettes.fog_color(horizon, pal, 1.0, 0.0)
+    assert full @ palettes.LUMA == pytest.approx(horizon @ palettes.LUMA)
+    assert full[0] > full[2]                                 # orangé, plus bleu
+    st = BackgroundState()
+    a = run(st, settings(bg_comp_fog_tint=0.0)).uniforms["u_hor_col"]
+    b = run(BackgroundState(), settings(bg_comp_fog_tint=1.0)).uniforms["u_hor_col"]
+    assert not np.allclose(a, b)
+
+
+def test_wave_stretch_accounts_for_the_chained_ripples():
+    v = macros.apply(schema.defaults())
+    w = dict(v, bg_dx_wave_amp=0.2, bg_dx_wave_len=4.0)
+    ka = 2.0 * math.pi * 0.2 * v["bg_sp_period"] / 4.0
+    assert params.deform_stretch(w) >= (1.0 + ka) * (1.0 + 0.73 * ka)
+
+
+def test_materials_set_their_reflections():
+    assert schema.MATERIALS["Chrome"]["bg_mat_env"] > schema.MATERIALS["Argile"]["bg_mat_env"]
+
+
 def test_light_temperature_and_tint():
     assert np.allclose(palettes.kelvin(6600.0), 1.0, atol=0.02)
     warm, cold = palettes.kelvin(2500.0), palettes.kelvin(10000.0)

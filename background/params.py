@@ -131,7 +131,12 @@ def deform_stretch(v: dict) -> float:
     déformations près du couloir (sur une période)."""
     P = v["bg_sp_period"]
     amp = v["bg_dx_wave_amp"] * P
-    wave = 1.0 + 2.0 * math.pi * amp / v["bg_dx_wave_len"] * 1.42 + 1.5 * amp / P
+    # deux ondulations enchaînées (la 2e lit le point déjà déplacé par la
+    # 1re) : leurs étirements se multiplient — les additionner laissait les
+    # rayons sauter par-dessus les surfaces (mouchetures, zébrures)
+    ka = 2.0 * math.pi * amp / v["bg_dx_wave_len"]
+    edge = 1.5 * amp / P                       # pente de l'extinction près du couloir
+    wave = (1.0 + ka + edge) * (1.0 + 0.73 * ka + edge)
     warp_amp = v["bg_dx_warp_amp"]
     texels = noise.SIZE * v["bg_dx_warp_freq"] / noise.CELLS     # texels par unité
     warp = 1.0
@@ -314,7 +319,9 @@ class BackgroundState:
             "u_sun_col": tuple(float(c) for c in sun),
             "u_sky_col": tuple(c * v["bg_light_sky"]
                                for c in lin_hsv(v["bg_light_sky_hue"], 0.45, 1.0)),
-            "u_hor_col": lin_hsv(v["bg_col_hor_hue"], 0.6, v["bg_col_hor_lum"]),
+            "u_hor_col": tuple(float(c) for c in palettes.fog_color(
+                lin_hsv(v["bg_col_hor_hue"], 0.6, v["bg_col_hor_lum"]), self.palette,
+                v["bg_comp_fog_tint"], 2.0 * math.pi * (hue % 1.0))),
             "u_shadow_col": tuple(c * v["bg_col_shadow"]
                                   for c in lin_hsv(v["bg_col_shadow_hue"], 0.8, 1.0)),
             "u_emit_col": tuple(c * v["bg_col_emit"]

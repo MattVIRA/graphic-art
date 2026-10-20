@@ -1,10 +1,11 @@
 """Palettes du fond (T16), calculées en numpy puis envoyées au shader comme
 une petite texture 1D (`SIZE` couleurs, linéaires).
 
-Le shader lit la palette en miroir (aller-retour) : un dégradé A → B → C
-se répète sans couture. La teinte globale (décalage, cycle, musique,
-harmonie) n'est pas cuite dans la texture : le shader la fait tourner
-chaque frame, la texture n'est renvoyée que si la palette change.
+Le shader lit la palette d'un bout à l'autre, sans miroir ni répétition
+(passe 3 : la répétition dessinait des bandes « vieux graphisme »). La
+teinte globale (décalage, cycle, musique, harmonie) n'est pas cuite dans
+la texture : le shader la fait tourner chaque frame, la texture n'est
+renvoyée que si la palette change.
 """
 
 import numpy as np
@@ -117,3 +118,25 @@ def tint(amount: float) -> np.ndarray:
     constante (linéaire)."""
     rgb = to_linear(kelvin(6500.0 - 3500.0 * float(amount))).astype(np.float64)
     return rgb / max(float(rgb @ np.array([0.2126, 0.7152, 0.0722])), 1e-6)
+
+
+LUMA = np.array([0.2126, 0.7152, 0.0722])
+
+
+def hue_rotate(rgb, angle: float) -> np.ndarray:
+    """Rotation de teinte autour de l'axe des gris, comme hue_rotate() du
+    shader (main.glsl)."""
+    k = np.full(3, 1.0 / np.sqrt(3.0))
+    c = np.asarray(rgb, dtype=np.float64)
+    ca = np.cos(angle)
+    return c * ca + np.cross(k, c) * np.sin(angle) + k * (c @ k) * (1.0 - ca)
+
+
+def fog_color(horizon, palette_linear, amount: float, hue_angle: float) -> np.ndarray:
+    """Couleur de l'horizon et de la brume : celle réglée, mêlée (amount)
+    à la couleur moyenne de la palette tournée comme les formes, à la même
+    luminance : le lointain se fond dans une brume de la couleur du décor."""
+    horizon = np.asarray(horizon, dtype=np.float64)
+    mean = np.maximum(hue_rotate(np.asarray(palette_linear).mean(axis=0), hue_angle), 0.0)
+    tinted = mean * (horizon @ LUMA) / max(float(mean @ LUMA), 1e-4)
+    return horizon + (tinted - horizon) * float(amount)

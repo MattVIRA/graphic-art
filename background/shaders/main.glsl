@@ -15,17 +15,30 @@ float scene(vec3 pw) {
 }
 
 // brume de distance (perspective atmosphérique) ; un détail plus fin que
-// ~2 pixels s'y fond aussi : pas de grain ni de moiré qui scintille au loin
+// ~3 pixels s'y fond aussi : pas de grain ni de moiré (zébrures) au loin
 float haze(float t) {
     float fog = 1.0 - exp(-u_comp_fade * t * 0.06);
     float px = u_detail / max(t * u_pix, 1e-6);
-    return max(fog, 1.0 - smoothstep(1.5, 5.0, px));
+    return max(fog, 1.0 - smoothstep(2.5, 8.0, px));
 }
 
-// fond du monde : un horizon lumineux qui donne la profondeur, le ciel au-dessus
+// fond du monde : un horizon lumineux qui donne la profondeur, le ciel
+// au-dessus, et la brume qui s'éclaire dans la direction de la lumière
 vec3 sky(vec3 rd) {
+    float toward = max(dot(rd, normalize(u_sun_dir)), 0.0);
     return u_hor_col * (1.0 + 2.5 * exp(-abs(rd.y) * 5.0))
-         + u_sky_col * 0.06 * max(rd.y, 0.0);
+         + u_sky_col * 0.06 * max(rd.y, 0.0)
+         + u_sun_col * u_comp_fog_glow * 0.04 * (pow(toward, 6.0) + 0.3 * pow(toward, 2.0));
+}
+
+// ce que reflètent les formes : un ciel en dégradé (sol sombre, horizon
+// lumineux, zénith) qui se floute vers sa moyenne quand la matière est
+// rugueuse — le chrome devient un vrai métal, pas une tache unie
+vec3 environment(vec3 r, float rough) {
+    vec3 sharp_env = u_sky_col * (0.15 + 0.85 * smoothstep(-0.25, 0.9, r.y))
+                   + u_hor_col * 4.0 * exp(-abs(r.y) * 6.0);
+    vec3 blurred = u_sky_col * 0.45 + u_hor_col * 1.2;
+    return mix(sharp_env, blurred, rough * rough);
 }
 
 vec3 scene_material(vec3 pw) {
@@ -76,9 +89,21 @@ float occlusion(vec3 p, vec3 n, float steps_frac) {
 #endif
 }
 
+// palette lue d'un bout à l'autre, sans miroir ni répétition : une
+// coordonnée répétée dessinait des bandes de dégradé « vieux graphisme »
 vec3 palette(float x) {
-    x = abs(fract(x * 0.5) * 2.0 - 1.0);           // lecture en miroir
+    x = clamp(x, 0.0, 1.0);
     return texture(u_palette, vec2(x * (255.0 / 256.0) + 0.5 / 256.0, 0.5)).rgb;
+}
+
+// bruit 3D (background/noise.py) à l'échelle `size` (unités du fond), canal c
+float noise3(vec3 ps, float size, int c) {
+    return texture(u_noise, ps / (size * NOISE_CELLS))[c];
+}
+
+// le bruit est resserré autour de 0,5 : on l'étale sur 0–1
+float spread01(float n) {
+    return smoothstep(0.28, 0.72, n);
 }
 
 vec3 hue_rotate(vec3 c, float a) {
@@ -89,64 +114,103 @@ vec3 hue_rotate(vec3 c, float a) {
 
 float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
-vec3 albedo(vec3 pos, vec3 n, vec3 rd, float t, float tmax, float steps_frac, vec3 m,
-            float sharp) {
+// ps : point dans l'espace des formes (fixe dans le décor) ; occ : occlusion
+vec3 albedo(vec3 ps, vec3 n, float t, float tmax, vec3 m, float occ, float fine) {
     int src = int(u_col_source + 0.5);
-    float x = src == 0 ? pos.y * 0.15 + 0.5
+    float s = src == 0 ? clamp(0.5 + (ps.y - u_path_o.y) * 0.03, 0.0, 1.0)
             : src == 1 ? t / tmax
             : src == 2 ? dot(n, vec3(0.3, 0.55, 0.78)) * 0.5 + 0.5
             : src == 3 ? m.x
             : src == 4 ? m.y
-            : src == 5 ? steps_frac * 2.0
-            : length(pos) * 0.12;
-    float fres = 1.0 - clamp(dot(n, -rd), 0.0, 1.0);
-    x = x * u_col_repeat + u_col_irid * u_col_irid_freq * fres * 0.3 * sharp;
+            : src == 5 ? spread01(noise3(ps, u_col_noise, 2))
+            : clamp(1.4 * occ - 0.3, 0.0, 1.0);
+    float x = 0.5 + u_col_spread * (s - 0.5) + u_col_inst * (m.y - 0.5);
     if (u_col_steps >= 2.0)
         x = floor(x * u_col_steps) / u_col_steps;
     vec3 c = hue_rotate(palette(x), u_hue_rot);
     c = max(mix(vec3(luma(c)), c, u_col_sat), 0.0);
     c = pow(c / 0.25, vec3(u_col_contrast)) * 0.25;
+    // grain de la matière : couleur marbrée, effacée quand il ferait < ~3 px
+    if (u_mat_grain > 0.0)
+        c *= 1.0 + u_mat_grain * fine * (noise3(ps, u_mat_bump_size * 2.5, 1) - 0.5) * 1.2;
     return c * u_tint;
+}
+
+// relief de surface : la normale suit la pente d'un bruit fin (aucun pas
+// de marche en plus) ; fine = 0 quand le relief ferait moins de ~3 px
+vec3 bump(vec3 ps, vec3 n, float fine) {
+    float k = u_mat_bump * fine;
+    if (k <= 0.001) return n;
+    float size = u_mat_bump_size;
+    float e = size * 0.12;
+    vec3 g = vec3(noise3(ps + vec3(e, 0.0, 0.0), size, 0) - noise3(ps - vec3(e, 0.0, 0.0), size, 0),
+                  noise3(ps + vec3(0.0, e, 0.0), size, 0) - noise3(ps - vec3(0.0, e, 0.0), size, 0),
+                  noise3(ps + vec3(0.0, 0.0, e), size, 0) - noise3(ps - vec3(0.0, 0.0, e), size, 0));
+    // pente du relief (hauteur ∝ taille) ramenée dans le repère du monde
+    g = transpose(u_rot) * g * (size * 0.6 / (2.0 * e)) * k;
+    return normalize(n - (g - dot(g, n) * n));
+}
+
+// veines lumineuses : crêtes du bruit (là où il passe par 0,5), qui
+// glissent lentement dans le décor
+float veins(vec3 ps, float fine) {
+    if (u_mat_veins <= 0.0) return 0.0;
+    float v = noise3(ps + vec3(0.0, u_time * 0.03, u_time * 0.017), u_mat_veins_size, 1);
+    float w = u_mat_veins_width * 0.25;
+    return u_mat_veins * (1.0 - smoothstep(0.0, w, abs(v - 0.5))) * (0.3 + 0.7 * fine);
 }
 
 vec3 shade(vec3 pos, vec3 rd, float t, float tmax, float steps_frac) {
     float e = max(u_pix * t, 1e-4);
+    float px = 1.0 / max(t * u_pix, 1e-6);          // pixels par unité à cette distance
     // détail de quelques pixels : sa normale est bruitée → arêtes, reflets
     // et irisation s'effacent au lieu de scintiller
-    float sharp = smoothstep(2.0, 8.0, u_detail / max(t * u_pix, 1e-6));
+    float sharp = smoothstep(2.0, 8.0, u_detail * px);
+    vec3 ps = (u_rot * pos + u_offset) / u_scale;   // espace des formes (fixe)
+    float fine = smoothstep(3.0, 10.0, u_mat_bump_size * u_scale * px);
     vec4 nc = normal_curv(pos, e);
     vec3 n = nc.xyz;
     vec3 m = scene_material(pos);
-    vec3 alb = albedo(pos, n, rd, t, tmax, steps_frac, m, sharp);
+    float ao = pow(occlusion(pos, n, steps_frac), u_mat_ao);
+    vec3 alb = albedo(ps, n, t, tmax, m, ao, fine);
+    n = bump(ps, n, fine * sharp);
     vec3 L = normalize(u_sun_dir);
     vec3 V = -rd;
     float ndl = dot(n, L);
     float sh = 1.0;
     if (u_light_shadow > 0.01 && ndl > 0.0)
-        sh = mix(1.0, soft_shadow(pos + n * 2.0 * e, L, mix(2.0, 24.0, u_light_shadow)),
+        sh = mix(1.0, soft_shadow(pos + nc.xyz * 2.0 * e, L, mix(2.0, 24.0, u_light_shadow)),
                  min(u_light_shadow * 2.0, 1.0));
-    float ao = pow(occlusion(pos, n, steps_frac), u_mat_ao);
     float w = u_mat_transl;
     float dif = clamp((ndl + w) / (1.0 + w), 0.0, 1.0) * sh;
     float sky = clamp(0.5 + 0.5 * n.y, 0.0, 1.0) * ao;
     float bounce = clamp(0.5 - 0.5 * n.y, 0.0, 1.0) * ao * 0.25;
-    float fres = pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 5.0);
+    float ndv = clamp(dot(n, V), 0.0, 1.0);
+    float fres = pow(1.0 - ndv, 5.0);
     float sp = exp2(10.0 * (1.0 - u_mat_rough) + 1.0);
     float spec = pow(clamp(dot(n, normalize(L + V)), 0.0, 1.0), sp) * (sp + 8.0) / 25.0;
     vec3 F = mix(vec3(0.04), alb, u_mat_metal);
     F += (1.0 - F) * fres;
+    // irisation en film mince : les reflets changent de couleur avec l'angle
+    vec3 film = 0.5 + 0.5 * cos(2.0 * PI * (u_col_irid_freq * 0.35 * (1.0 - ndv)
+                                             + vec3(0.0, 0.33, 0.67)));
+    F *= mix(vec3(1.0), film * 1.8, u_col_irid * sharp);
     vec3 diff = alb * (1.0 - u_mat_metal);
+    vec3 refl = environment(reflect(rd, n), u_mat_rough);
     vec3 col = diff * (u_sun_col * dif + u_sky_col * (sky + bounce))
              + diff * u_shadow_col * (1.0 - sh) * clamp(ndl, 0.0, 1.0) * 0.6
              + F * u_sun_col * spec * sh * (1.0 - u_mat_rough * 0.8) * sharp
-             + F * u_sky_col * u_mat_fresnel * fres * ao * 2.0 * mix(0.3, 1.0, sharp);
+             + F * refl * u_mat_env * ao * mix(0.4, 1.0, sharp)
+             + F * u_sky_col * u_mat_fresnel * fres * ao * mix(0.3, 1.0, sharp);
+    // contre-jour : le bord prend la couleur de la brume, la forme se détache
+    col += (u_hor_col * 3.0 + u_sky_col * 0.15) * u_mat_rim * pow(1.0 - ndv, 3.0) * ao;
     // le modèle, au centre, éclaire le fond
     vec3 lc = -pos;
     float dc = length(lc);
     col += diff * u_center_col * clamp(dot(n, lc / dc), 0.0, 1.0) / (1.0 + dc * dc * 0.08);
-    // émission : matière propre, joints, arêtes (courbure), flash
+    // émission : matière propre, joints, arêtes (courbure), veines, flash
     float edge = smoothstep(0.15, 0.8, nc.w) * u_edges * sharp;
-    col += alb * u_mat_emit * 2.0 + u_emit_col * (m.z + edge + u_flash);
+    col += alb * u_mat_emit * 2.0 + u_emit_col * (m.z + edge + veins(ps, fine) + u_flash);
     return col;
 }
 

@@ -118,6 +118,17 @@ float clearance(float half_cell, float reach_world) {
     return max(half_cell - reach_world, 0.02 * u_sp_period);
 }
 
+// les voisines sont identiques à cette instance (ni désordre, ni manquantes,
+// ni vague, ni satellites asymétriques) et assez loin du couloir pour ne pas
+// être réduites : la répétition simple suffit, sans borne de cellule (les
+// rayons ne rampent plus le long des bords : moins de pas épuisés, moins
+// de mouchetures)
+bool same_neighbours(float dist_c, float reach_world) {
+    return u_sp_disorder <= 0.0 && u_sp_missing <= 0.0 && u_sh_wave <= 0.0
+        && u_fu_count < 0.5 && u_sp_eq <= 0.0
+        && dist_c - void_radius() > reach_world + 1.8 * u_sp_period;
+}
+
 // la cellule fait `cell` périodes de large (au plus étroit)
 float fit(float cell, float reach) {
     return min(1.0, FIT * cell / max(reach, 1e-4));
@@ -159,9 +170,11 @@ Inst sp_grid(vec3 p) {          // Grille 3D, alignée sur le décor
     I.q = q;
     I.c = id * P;
     I.h = hash13(id + 17.0);
-    I.k = kf * presence(path_dist(I.c), u_reach * P * kf, I.h);
+    float dist = path_dist(I.c);
+    I.k = kf * presence(dist, u_reach * P * kf, I.h);
     I.unit = P;
-    I.bnd = (0.5 - max(abs(q.x), max(abs(q.y), abs(q.z)))) * P
+    I.bnd = same_neighbours(dist, u_reach * P * kf) ? FAR
+          : (0.5 - max(abs(q.x), max(abs(q.y), abs(q.z)))) * P
           + clearance(0.5 * P, u_reach * P * kf);
     I.ystr = 1.0;
     I.floor_d = FAR;
@@ -220,7 +233,8 @@ Inst sp_rings(vec3 p) {         // Anneaux le long du trajet
     I.h = hash12(vec2(ia, iz) + 11.0);
     I.k = kf * (I.h < u_sp_missing ? 0.0 : 1.0);
     I.unit = P;
-    I.bnd = min(L * 0.5 - abs(zq), r * sin(max(sec * 0.5 - abs(al), 0.0)))
+    I.bnd = same_neighbours(FAR, 0.0) ? FAR
+          : min(L * 0.5 - abs(zq), r * sin(max(sec * 0.5 - abs(al), 0.0)))
           + clearance(min(L * 0.5, R * sin(sec * 0.5)), u_reach * P * kf);
     I.ystr = 1.0;
     I.floor_d = FAR;
@@ -251,7 +265,8 @@ Inst sp_mirror(vec3 p) {        // Miroirs : grille du repère du trajet, repli�
     I.h = hash13(id + 23.0);
     I.k = kf * presence(length(c.xy), u_reach * P * kf, I.h);
     I.unit = P;
-    I.bnd = (0.5 - max(abs(q.x), max(abs(q.y), abs(q.z)))) * P
+    I.bnd = same_neighbours(length(c.xy), u_reach * P * kf) ? FAR
+          : (0.5 - max(abs(q.x), max(abs(q.y), abs(q.z)))) * P
           + clearance(0.5 * P, u_reach * P * kf);
     I.ystr = 1.0;
     I.floor_d = FAR;
