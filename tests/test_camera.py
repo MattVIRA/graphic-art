@@ -1,4 +1,4 @@
-"""Caméra orbitale (T26) : vue par défaut, bornes, inertie, retour, autosave."""
+"""Caméra orbitale (T1.13) : vue par défaut, bornes, inertie, retour, autosave."""
 
 import math
 

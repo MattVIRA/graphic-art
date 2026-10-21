@@ -1,4 +1,4 @@
-// Paysage du fond (T16, passe finale) : le seul générateur. Un terrain
+// Paysage du fond (T1.16, passe finale) : le seul générateur. Un terrain
 // h(x, z) sous le trajet de l'objet, lu dans deux cartes de hauteur
 // périodiques précalculées en Python (background/terrain.py) : la carte
 // (grandes couches, déformées, érodées, en terrasses ; creux ; poids du

@@ -1,5 +1,5 @@
 """Paramètres du panneau + effets routés → réglages du renderer, puis passe
-de dessin (sorti de main.py par T22).
+de dessin (sorti de main.py par T1.15).
 
 Les fonctions pures (`model_params`, `zoom_pulse`, `shake`) sont testées
 dans tests/test_routing.py ; `apply_look` et `draw` ne font qu'appeler le
@@ -40,7 +40,7 @@ def model_params(p: dict, fx: dict) -> dict:
     + les effets routés sur le modèle."""
     p2 = dict(p)
     p2["fx_rot"] = fx["Vitesse rotation"]
-    if p["music_spin"] < 0.5:   # T26: freeze the model to explore it
+    if p["music_spin"] < 0.5:   # T1.13: freeze the model to explore it
         p2["rot_gain"] = 0.0
     p2["inflate"] = p["inflate"] + fx["Gonflement"]
     # no motion unless Turbulence is routed in Physique; the Objet tab

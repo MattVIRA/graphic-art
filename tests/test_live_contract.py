@@ -1,4 +1,4 @@
-"""LiveAnalyzer (T22) : même contrat de features que l'analyzer, perte du
+"""LiveAnalyzer (T1.15) : même contrat de features que l'analyzer, perte du
 périphérique et décrochages — sans carte son (flux sounddevice simulé)."""
 
 import numpy as np

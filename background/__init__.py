@@ -1,4 +1,4 @@
-"""Fond de scène en formes SDF raymarchées (T16).
+"""Fond de scène en formes SDF raymarchées (T1.16).
 
 - `schema` : la déclaration de tous les paramètres (une ligne = un réglage
   du panneau, un uniform, une plage de dé, une réponse aux macros) ;

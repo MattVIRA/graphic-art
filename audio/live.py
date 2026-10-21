@@ -45,7 +45,7 @@ class LiveAnalyzer:
 
         self._peaks = {}          # adaptive normalization state
 
-        # ── T2: streaming beat tracking ──
+        # ── T1.3: streaming beat tracking ──
         # onset-energy envelope sampled on the fixed 512-sample block grid
         # (~86 Hz), tempo by autocorrelation + log-tempo prior (Ellis),
         # beat phase by comb alignment.
@@ -81,7 +81,7 @@ class LiveAnalyzer:
         except (ValueError, sd.PortAudioError):
             pass   # mono par défaut ; un périphérique invalide fait échouer
                    # InputStream juste en dessous, avec un vrai message
-        self._last_block = time.monotonic()   # dernier bloc reçu (T22 : perte du périphérique)
+        self._last_block = time.monotonic()   # dernier bloc reçu (T1.15 : perte du périphérique)
         self._xruns = 0                         # blocs signalés en défaut par PortAudio
         self._stream = sd.InputStream(device=device, channels=channels,
                                       samplerate=sr, blocksize=512,
@@ -147,7 +147,7 @@ class LiveAnalyzer:
             self._stream.close()
 
     # ------------------------------------------------------------------
-    # T2: streaming tempo estimation
+    # T1.3: streaming tempo estimation
 
     def _estimate_tempo(self):
         size = len(self._env)

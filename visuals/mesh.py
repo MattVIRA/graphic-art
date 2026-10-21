@@ -1,5 +1,5 @@
 """
-3D model source (T19) — loading, normalization and GPU buffers.
+3D model source (T1.9) — loading, normalization and GPU buffers.
 
 Knows neither pygame nor moderngl. Two stages:
   load_model(path)  → RawModel   heavy (file parsing, texture → vertex colors,

@@ -1,4 +1,4 @@
-"""Stockage des presets (T24) : enregistrer / relire / supprimer, fichier
+"""Stockage des presets (T1.12) : enregistrer / relire / supprimer, fichier
 corrompu, premier lancement, fusion des presets intégrés."""
 
 import json
@@ -110,7 +110,7 @@ BUILTIN = {
 
 
 def test_builtins_always_listed_and_not_written(tmp_store):
-    """Un preset intégré ajouté après coup (Studio, T21) apparaît même si
+    """Un preset intégré ajouté après coup (Studio, T1.10) apparaît même si
     l'onglet existe déjà dans le fichier, sans effacer les presets
     utilisateur."""
     write(tmp_store / "presets.json",
@@ -127,7 +127,7 @@ def test_builtins_always_listed_and_not_written(tmp_store):
 
 
 def test_stale_builtin_copies_are_dropped(tmp_store):
-    """Avant T24 les intégrés étaient recopiés dans le fichier, figés à
+    """Avant T1.12 les intégrés étaient recopiés dans le fichier, figés à
     leurs clés de l'époque : le preset intégré à jour les remplace."""
     d = {"_tab_presets": {"Physique": {
         "Défaut": {"band0_fx": 0.0},              # vieille copie
@@ -148,7 +148,7 @@ def test_deleting_user_override_brings_builtin_back():
 
 def test_real_physics_builtins_include_studio():
     from gfx.controls import PHYSICS_PRESETS
-    # fichier d'avant T24 : onglet Physique déjà présent, sans Studio
+    # fichier d'avant T1.12 : onglet Physique déjà présent, sans Studio
     old = {n: {k: v for k, v in vals.items()
                if not k.startswith(("band8", "band9", "band10"))}
            for n, vals in PHYSICS_PRESETS.items() if n != "Studio"}

@@ -1,4 +1,4 @@
-"""Déclaration de tous les paramètres du fond (T16).
+"""Déclaration de tous les paramètres du fond (T1.16).
 
 Une entrée `Param` décrit à la fois le réglage du panneau (libellé, plage,
 widget, groupe), l'uniform du shader, la sous-plage tirée par le dé, la
@@ -139,7 +139,7 @@ BREATH_BEATS = ((0.5, "½ beat"), (1.0, "1 beat"), (2.0, "2 beats"),
 TOP = [
     Param("bg_visible", "Fond visible", "top", 0, 1, 0, check=True,
           kind="setting", shader=False,
-          tip="Masqué = rendu d'avant T16, sans aucun coût"),
+          tip="Masqué = rendu d'avant T1.16, sans aucun coût"),
     Param("bg_quality", "Qualité", "top", 0, 3, 1, step=1,
           options=tuple(QUALITIES), kind="setting", shader=False,
           tip="Bas / Moyen / Haut : nombre de pas, ombres, occlusion.\n"
@@ -435,12 +435,12 @@ MAT = _group(
           tip="Le soleil s'allume sur la caisse claire")),
 )
 
-# ── texture du relief (T29) : une décoration peinte sur le relief, fixe ──
+# ── texture du relief (T1.17) : une décoration peinte sur le relief, fixe ──
 # Le motif dit quelle forme dessine la texture, rendue en chrome
 # (main.glsl) ; les réglages communs déforment le motif selon le relief
 # (comme l'outil de réaction-diffusion de Karl Sims). Ni musique ni
 # macros : la texture est collée au décor (validate()). Motif « Aucun » =
-# la matière du groupe « Matière et lumière », image d'avant T29.
+# la matière du groupe « Matière et lumière », image d'avant T1.17.
 TEX_MOTIFS = ("Aucun", "Volutes", "Vermicelles", "Coulures", "Gouttes", "Cellules",
               "Strates", "Isolignes", "Veines")
 TEX_ORIENTS = ("Selon les courbes de niveau", "Fixe")
@@ -678,7 +678,7 @@ MATERIALS = {
               "bg_mat_emit": 0.0, "bg_mat_fresnel": 1.0, "bg_col_irid": 0.8, "bg_mat_env": 1.0},
 }
 
-# ambiances intégrées : presets de l'onglet Fond (T24 : jamais copiés dans
+# ambiances intégrées : presets de l'onglet Fond (T1.12 : jamais copiés dans
 # presets.json) ; les réglages absents reprennent leur défaut
 AMBIANCES = {
     "Planète inconnue": {
@@ -760,7 +760,7 @@ AMBIANCES = {
 }
 
 
-# recettes de la texture du relief (T29) : un paysage ci-dessus + un motif
+# recettes de la texture du relief (T1.17) : un paysage ci-dessus + un motif
 # et ses réglages (le reste de la texture à son défaut)
 TEX_AMBIANCES = {
     "Chrome fondu": ("Dunes", {
@@ -849,7 +849,7 @@ def _check_audio(p: Param) -> list:
 
 
 def _check_texture(p: Param) -> list:
-    """La texture du relief est fixe (T29) : ni musique ni macros ; un
+    """La texture du relief est fixe (T1.17) : ni musique ni macros ; un
     réglage propre (`only`) vise un menu de la texture et ses valeurs."""
     errors = []
     if p.key.startswith("bg_tex_") and p.audio is not None:

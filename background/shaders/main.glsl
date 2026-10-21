@@ -1,4 +1,4 @@
-// Fond SDF (T16) — raymarcher commun : rayon de la caméra, marche
+// Fond SDF (T1.16) — raymarcher commun : rayon de la caméra, marche
 // sur-relaxée, normale, ombre, occlusion, couleur, éclairage « extérieur ».
 // Sortie : HDR linéaire, alpha 1 ; le composite le glisse sous la scène.
 // MAX_STEPS, SHADOW_STEPS, AO_SAMPLES : #define du niveau de qualité.
@@ -223,7 +223,7 @@ vec3 shade(vec3 pos, vec3 rd, float t, float tmax, float steps_frac) {
     // occlusion : creux du relief précalculés (toutes échelles) × creux
     // proches mesurés autour du point (flancs de la vallée, voûte)
     float ao = pow(occlusion(pos, n, steps_frac) * terrain_occlusion(ps), u_mat_ao);
-    // matière : celle du groupe Matière, ou le style de la texture (T29,
+    // matière : celle du groupe Matière, ou le style de la texture (T1.17,
     // texture.glsl), qui la remplace entièrement (grain, relief, veines,
     // émission, irisation)
     float rough = u_mat_rough, metal = u_mat_metal, base = 1.0;

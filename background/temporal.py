@@ -1,4 +1,4 @@
-"""Accumulation temporelle du fond (T16, passe 5), sans GL.
+"""Accumulation temporelle du fond (T1.16, passe 5), sans GL.
 
 Le fond est calculé à une fraction de la résolution (⅓ par défaut), avec un
 rayon par pixel. Chaque frame, ce rayon est décalé d'une fraction de pixel

@@ -7,11 +7,11 @@ own process (multiprocessing) and streams messages back through a Queue:
     ("action", name, payload)     e.g. ("action", "load_visual", "/path/img.png")
 The main loop polls `ControlPanel.poll()` once per frame.
 
-T8: a second queue goes the other way (main → panel) with small monitoring
+T1.8: a second queue goes the other way (main → panel) with small monitoring
 packets (~15 Hz): band levels, rms, bpm, fps, source label. The panel draws
 VU meters in the Physique tab and a status bar at the bottom.
 
-T22 : les paquets portent aussi les messages d'erreur du moteur (`errors`),
+T1.15 : les paquets portent aussi les messages d'erreur du moteur (`errors`),
 affichés en rouge dans la barre de statut. La file est à perte (seul le
 paquet le plus frais compte) : les erreurs attendent donc côté moteur
 jusqu'à ce qu'un paquet soit accepté, et le panneau les lit dans tous les
@@ -33,8 +33,8 @@ from visuals.mesh import UP_AXES as MESH_UP_AXES
 
 log = logging.getLogger(__name__)
 
-# presets.json (gitignoré) : presets nommés + "_autosave" + "_window" (T7),
-# stockage atomique et presets de départ dans gfx/presets.py (T24)
+# presets.json (gitignoré) : presets nommés + "_autosave" + "_window" (T1.7),
+# stockage atomique et presets de départ dans gfx/presets.py (T1.12)
 
 DEFAULTS = {
     # ── Vidéo ──
@@ -46,17 +46,17 @@ DEFAULTS = {
     "negative":    0.0,    # invert mix                   0 .. 1
     "brightness":  1.0,    # pre-tonemap exposure         0.2 .. 2.5
     "bloom":       0.9,    # bloom intensity              0 .. 3
-    "bloom_radius": 0.5,   # T6: 0 = glow serré, 1 = larges halos
+    "bloom_radius": 0.5,   # T1.6: 0 = glow serré, 1 = larges halos
     "bloom_threshold": 0.8,  # luminance (linéaire) où le glow commence
     "vignette":    0.25,   # assombrit les bords de l'image   0 .. 1
-    "render_scale": 1.5,   # T6: densité de rendu (px internes / px logique) ;
+    "render_scale": 1.5,   # T1.6: densité de rendu (px internes / px logique) ;
                            # sans effet sur Retina (déjà 2×), MSAA 4× en plus
     "trail":       0.30,   # fade per frame (high = short trails)
     "point_size":  1.0,    # particle size multiplier
     "zoom":        1.0,    # camera zoom (also mouse wheel)   0.3 .. 3
-    "reactivity":  1.0,    # T4: release scaling — high = percussive, low = floaty
+    "reactivity":  1.0,    # T1.5: release scaling — high = percussive, low = floaty
     "show_grid":   1.0,    # 1 = draw the static world grid
-    # ── Objet : modèle 3D (T19) ──
+    # ── Objet : modèle 3D (T1.9) ──
     "turbulence":  1.0,    # dose of the routed Turbulence effect
     "n_points":    1000.0, # point budget in thousands (style Points)
     "model_style": 1.0,    # index in MODEL_STYLES (1 = Surface)
@@ -77,7 +77,7 @@ DEFAULTS = {
     "wire_hidden": 0.0,    # wireframe: hide the edges behind the surface
     # ── Rotation (fixed scene parameters — music only drives the spin) ──
     "rot_gain":     1.0,   # spin speed multiplier         0 .. 3
-    "music_spin":   1.0,   # T26: 0 = the model stops spinning (to explore it)
+    "music_spin":   1.0,   # T1.13: 0 = the model stops spinning (to explore it)
     "axis_tilt":    15.0,  # rotation axis tilt from vertical (deg)  0 .. 90
     "axis_azimuth": 0.0,   # rotation axis azimuth (deg)             0 .. 360
     "orbit_dist":   0.0,   # object distance to the axis (px) → orbit radius
@@ -90,7 +90,7 @@ DEFAULTS = {
 
 # ── Physique : routing bandes de fréquences → effets ──────────────────
 EQ_BANDS = ["SUB", "BASS", "LOW MID", "MID", "HIGH MID", "PRESENCE", "TREBLE",
-            "BEAT",     # impulsion sur chaque beat, décroissante (T2)
+            "BEAT",     # impulsion sur chaque beat, décroissante (T1.3)
             "KICK",     # ressort amorti lancé par chaque grosse caisse (rebond)
             "SNARE",    # impulsion courte sur caisse claire / clap
             "ÉNERGIE"]  # énergie de la section : ~0 dans les breaks, ~1 sur un drop
@@ -106,14 +106,14 @@ EFFECTS = [
     "Turbulence",
     "Luminosité",
     "Taille points",
-    "Gonflement",     # T19: 3D model inflation along the normals
+    "Gonflement",     # T1.9: 3D model inflation along the normals
     "Lumière",        # 3D model: intensity of the studio lights
     "Rim",            # 3D model: fresnel rim boost
     "Secousse caméra",
 ]
 
 DEFAULTS["dynamics"] = 0.0   # 0 = off, 1 = effets très calmes dans les breaks
-DEFAULTS.update(bg_schema.defaults())   # T16 : onglet Fond (show_grid y déménage)
+DEFAULTS.update(bg_schema.defaults())   # T1.16 : onglet Fond (show_grid y déménage)
 
 for _i in range(len(EQ_BANDS)):
     DEFAULTS[f"band{_i}_fx"] = 0.0    # effect index in EFFECTS (0 = Aucun)
@@ -162,7 +162,7 @@ PHYSICS_PRESETS = {
     }),
 }
 
-# ── Vidéo : sliders regroupés par LabelFrame (T7) ──────────────────────
+# ── Vidéo : sliders regroupés par LabelFrame (T1.7) ──────────────────────
 VIDEO_GROUPS = [
     ("Couleur", [
         ("Rouge",      "red",        0.0, 2.0,  0.01, None),
@@ -312,7 +312,7 @@ def list_input_devices() -> list:
         return []
 
 
-# ── Thème sombre (T7) ───────────────────────────────────────────────────
+# ── Thème sombre (T1.7) ───────────────────────────────────────────────────
 BG      = "#15151c"   # window background
 CARD    = "#1b1b25"   # group / row background
 TROUGH  = "#2a2a38"
@@ -320,7 +320,7 @@ FG      = "#c8c8d8"
 MUTED   = "#71718a"
 ACCENT  = "#5fd7d7"   # cyan — values, VU meters
 ACCENT2 = "#8a7fd7"   # violet — selection, active elements
-ERROR   = "#ff6b6b"   # T22 : erreurs du moteur dans la barre de statut
+ERROR   = "#ff6b6b"   # T1.15 : erreurs du moteur dans la barre de statut
 ERROR_SECS = 5.0      # durée d'affichage d'une erreur
 VU_BG   = "#101018"
 
@@ -329,7 +329,7 @@ FONT_SM   = ("Menlo", 10)
 FONT_BOLD = ("Menlo", 11, "bold")
 
 
-def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — panneau tkinter remplacé par T27
+def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — panneau tkinter remplacé par T2.2
                init_params: dict = None, init_geometry: str = None,
                notice: str = None):
     import tkinter as tk
@@ -390,7 +390,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
     root.option_add("*TCombobox*Listbox.selectBackground", ACCENT2)
     root.option_add("*TCombobox*Listbox.font", FONT_SM)
 
-    # ── Tooltips (T7) ─────────────────────────────────────────────────
+    # ── Tooltips (T1.7) ─────────────────────────────────────────────────
     class Tooltip:
         def __init__(self, widget, text):
             self.widget, self.text = widget, text
@@ -443,14 +443,14 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
     nb = ttk.Notebook(root)
     nb.pack(fill="both", expand=True, padx=6, pady=6)
 
-    # ── Barre de statut (T8) ──────────────────────────────────────────
+    # ── Barre de statut (T1.8) ──────────────────────────────────────────
     status_lbl = tk.Label(root, text="—", bg=CARD, fg=MUTED, font=FONT_SM,
                           anchor="w", padx=10, pady=3)
     status_lbl.pack(fill="x", side="bottom")
     status_hold = {"until": 0.0}   # message affiché : le monitoring attend
 
     def flash_status(text, secs=4.0, color=ACCENT):
-        """Message temporaire dans la barre de statut (T24)."""
+        """Message temporaire dans la barre de statut (T1.12)."""
         status_hold["until"] = time.monotonic() + secs
         status_lbl.configure(text=text, fg=color)
 
@@ -536,7 +536,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
 
     def build_slider(parent, label, key, lo, hi, step, tip=None):
         """Return a (not yet packed) frame: label + live value + ttk.Scale.
-        Double-click resets the slider to its default (T7)."""
+        Double-click resets the slider to its default (T1.7)."""
         row = ttk.Frame(parent)
         row.columnconfigure(0, weight=1)
         decimals = 0 if step >= 1 else (1 if step >= 0.1 else 2)
@@ -651,7 +651,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
             return None
         return name
 
-    def tab_presets_ui(parent, tab, builtin, **pack_kw):  # noqa: C901 — idem (T27)
+    def tab_presets_ui(parent, tab, builtin, **pack_kw):  # noqa: C901 — idem (T2.2)
         """Presets propres à un onglet : liste + Charger / Sauver… / ✕.
         Un preset = snapshot des réglages de l'onglet seulement. Les presets
         intégrés (`builtin`) sont toujours listés, non supprimables."""
@@ -798,7 +798,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
     claim_keys("Vidéo")
     tab_presets_ui(tab_video, "Vidéo", {}, pady=(4, 12))
 
-    # ── Onglet Objet (modèle 3D, T19) ─────────────────────────────────
+    # ── Onglet Objet (modèle 3D, T1.9) ─────────────────────────────────
     tab_obj = make_tab("Objet")
     reset_button(tab_obj, "Objet")
 
@@ -848,7 +848,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
 
     claim_keys("Objet")
 
-    # ── Onglet Fond (T16 : formes SDF, généré depuis background/schema) ──
+    # ── Onglet Fond (T1.16 : formes SDF, généré depuis background/schema) ──
     tab_bg = make_tab("Fond")
     reset_button(tab_bg, "Fond")
     bg_panel.build(tab_bg, SimpleNamespace(
@@ -892,7 +892,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
     grp_rotp.columnconfigure(1, weight=1)
     claim_keys("Rotation")
 
-    # ── Onglet Physique (avec VU-mètres, T8) ──────────────────────────
+    # ── Onglet Physique (avec VU-mètres, T1.8) ──────────────────────────
     tab_phys = make_tab("Physique")
     reset_button(tab_phys, "Physique")
     random_button(tab_phys, random_physics_values)
@@ -938,7 +938,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
     claim_keys("Physique")
     tab_presets_ui(tab_phys, "Physique", PHYSICS_PRESETS, pady=(12, 12))
 
-    # ── Monitoring main → panel (T8) : VU-mètres + barre de statut ─────
+    # ── Monitoring main → panel (T1.8) : VU-mètres + barre de statut ─────
     vu_levels = [0.0] * len(EQ_BANDS)
 
     def poll_monitor():
@@ -974,7 +974,7 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
 
     poll_monitor()
 
-    # ── Position/taille de fenêtre mémorisées (T7) ─────────────────────
+    # ── Position/taille de fenêtre mémorisées (T1.7) ─────────────────────
     geom_state = {"after": None}
 
     def push_geometry():
@@ -1059,14 +1059,14 @@ def _run_panel(q: mp.Queue, mon_q: mp.Queue, devices: list,  # noqa: C901 — pa
     # restore the autosaved state (pushes the values back to main via the queue)
     if init_params:
         apply_values({k: v for k, v in init_params.items() if k in DEFAULTS})
-    if notice:   # presets.json était illisible (T24)
+    if notice:   # presets.json était illisible (T1.12)
         flash_status(notice, secs=15.0, color="#ff9f6b")
 
     root.mainloop()
 
 
 class ControlPanel:
-    MONITOR_INTERVAL = 1.0 / 15   # seconds between monitoring packets (T8)
+    MONITOR_INTERVAL = 1.0 / 15   # seconds between monitoring packets (T1.8)
 
     def __init__(self):
         self.params = dict(DEFAULTS)
@@ -1076,11 +1076,11 @@ class ControlPanel:
         auto = auto if isinstance(auto, dict) else {}
         self.params.update({k: float(v) for k, v in auto.items() if k in DEFAULTS})
         self.window_geometry = presets.get("_window") or None
-        self.camera_state = presets.get("_camera")   # T26, autosave only
+        self.camera_state = presets.get("_camera")   # T1.13, autosave only
         self.actions = []            # pending ("name", payload) actions
-        self._errors = []            # T22 : messages en attente d'un paquet de monitoring
+        self._errors = []            # T1.15 : messages en attente d'un paquet de monitoring
         self._q = mp.Queue()
-        self._mon_q = mp.Queue(maxsize=4)   # main → panel monitoring (T8)
+        self._mon_q = mp.Queue(maxsize=4)   # main → panel monitoring (T1.8)
         self._proc = mp.Process(target=_run_panel,
                                 args=(self._q, self._mon_q,
                                       list_input_devices(), auto,
@@ -1114,7 +1114,7 @@ class ControlPanel:
         self._errors.clear()
 
     def report(self, message: str):
-        """Message d'erreur à afficher dans la barre de statut (T22)."""
+        """Message d'erreur à afficher dans la barre de statut (T1.15)."""
         self._errors = (self._errors + [message])[-20:]   # panneau mort : pas de fuite
 
     @property
@@ -1133,7 +1133,7 @@ class ControlPanel:
             if kind == "param":
                 self.params[key] = val
             elif key == "_window":
-                self.window_geometry = val   # T7: saved with the autosave
+                self.window_geometry = val   # T1.7: saved with the autosave
             else:
                 self.actions.append((key, val))
         return self.params

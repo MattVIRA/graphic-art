@@ -1,20 +1,17 @@
-# Graphic Art
+# Graphic Art — V1
 
-Un visualiseur audio temps réel en Python et OpenGL. La musique (un fichier ou le son d'une appli) fait vibrer des centaines de milliers de particules : une image, un modèle 3D, ou une simple étoile.
+Un visualiseur audio temps réel en Python et OpenGL. Un modèle 3D se déforme sur
+la musique, dans un paysage généré : chaque bande de fréquences, chaque kick
+et chaque beat peut faire tourner, gonfler, briller ou secouer l'image.
 
-## Fonctionnalités
-
-- **Trois sources visuelles** : étoile (par défaut), image (chaque pixel devient une particule, avec détourage du sujet) et modèle 3D (`.glb .gltf .obj .stl .ply`) en Points, Surface ou Wireframe.
-- **Audio au choix** : fichier MP3/WAV analysé à l'avance, ou capture live (micro, BlackHole…) avec BPM et détection de beats en temps réel.
-- **Physique sur GPU** : jusqu'à 1 M de particules à 60 fps, avec turbulence, vagues et relief.
-- **Rendu soigné** : bloom multi-échelle, traînées, aberration chromatique, grain, anti-aliasing.
-- **Fond en paysage SDF** (onglet Fond) : un paysage 3D calculé par raymarching dans le même espace que le modèle, tiré au dé : montagnes à crêtes, dunes, plateaux en terrasses, canyons, collines… creusé à volonté de grottes, d'arches et de bulles, ou tordu en spirale. Le relief est précalculé (couches, rugosité, crêtes, érosion, déformation, terrasses), éclairé comme le modèle, qui y projette son ombre, et noyé dans une brume de vallée qui donne la profondeur. L'objet voyage au fond d'une vallée à la vitesse choisie ; le relief peut passer devant lui ; macros, couleurs, matière, dé à seed et 10 mondes prêts à l'emploi. « Lissage temporel » mélange les frames successives : contours nets et plus d'escaliers, même si le fond est calculé en ⅓ de résolution.
-- **Panneau de contrôle** : sliders, VU-mètres, rotation 3D paramétrable et routing libre des bandes de fréquences vers les effets.
-- **Presets** : tes réglages sont sauvegardés et restaurés au lancement.
+La musique vient d'un fichier (MP3, WAV) ou d'une source audio de l'ordinateur 
+en direct (micro, ahut-parleurs, etc). Un panneau de contrôle 
+permet de personnaliser et paramètrer l'outil
 
 ## Installation
 
-Il te faut Python 3.13 et un GPU compatible OpenGL 3.3.
+Prérequis : Python 3.13 et une carte graphique compatible OpenGL 3.3
+(développé sur macOS).
 
 ```bash
 git clone <url-du-repo>
@@ -24,64 +21,123 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Pour développer : outils qualité (ruff, pytest, pre-commit) et contrôle
-automatique à chaque `git commit` :
+## Utilisation
+
+```bash
+python main.py
+```
+
+Deux fenêtres s'ouvrent : le rendu, et le panneau de contrôle. Il suffit
+ensuite de choisir une musique dans l'onglet **Source**.
+
+On peut aussi tout donner au lancement :
+
+```bash
+python main.py morceau.mp3                    # lire un fichier
+python main.py morceau.mp3 --visual modele.glb  # avec un modèle 3D
+python main.py --visual primitive:box         # forme intégrée : torus, icosphere, box
+```
+
+### Raccourcis
+
+| Action | Geste |
+|---|---|
+| Pause / reprise | `Espace` |
+| Plein écran | `F` |
+| Revenir au tore | `U` |
+| Quitter | `Échap` |
+| Charger un modèle 3D | glisser-déposer le fichier dans la fenêtre |
+| Tourner autour du modèle | `⌘`/`Ctrl` + glisser, ou bouton du milieu |
+| Se déplacer | `Maj` + glisser |
+| Zoomer | molette |
+| Revenir à la vue de départ | `C` ou double-clic |
+
+### Modèles 3D
+
+Formats acceptés : `.glb` (le plus simple : un seul fichier, couleurs et
+textures comprises), `.gltf`, `.obj`, `.stl` et `.ply`. On en trouve
+beaucoup de gratuits sur internet (Sketchfab, Poly Pizza…), et on peut en
+créer ou en convertir depuis [Blender](https://www.blender.org/)
+(*Fichier → Exporter → glTF 2.0*).
+
+### Capturer le son d'une appli
+
+> **macOS**
+>
+> macOS ne donne pas accès au son d'une appli précise. Il faut l'envoyer
+> vers [BlackHole](https://github.com/ExistentialAudio/BlackHole) (ou
+> Background Music), puis choisir ce périphérique dans l'onglet **Source**.
+
+## Fonctionnalités de la V1
+
+**Le son**
+- Fichier MP3/WAV analysé à l'avance, ou capture en direct.
+- Détection du tempo (BPM), des beats, des kicks, des caisses claires et de
+  l'énergie du morceau (calme dans un break, forte sur un drop).
+- 7 bandes de fréquences, du sub-grave aux aigus.
+
+**Le modèle 3D**
+- Formats `.glb .gltf .obj .stl .ply`, chargés sans bloquer l'affichage.
+- Trois styles : **Points**, **Surface** (éclairage studio réaliste) et
+  **Wireframe** (fil de fer).
+- Rotation autour d'un axe réglable, qui peut lui-même tourner ; vitesse
+  pilotée par la musique (à désactiver pour explorer le modèle).
+
+**La réaction à la musique** (onglet Physique)
+- Chaque source (7 bandes, BEAT, KICK, SNARE, ÉNERGIE) se branche sur un
+  effet : rotation, zoom, gonflement, turbulence, luminosité, traînées,
+  décalage des couleurs, secousse de caméra…
+- VU-mètres en direct pour voir ce qui bouge.
+- Presets intégrés (Studio, Chromatique, Psyché) et réglage « Dynamique »
+  qui calme tout pendant les passages doux.
+
+**Le fond** (onglet Fond, masqué par défaut)
+- Un paysage 3D généré : montagnes, dunes, canyons, terrasses, grottes,
+  arches… L'objet voyage au fond d'une vallée, le relief peut passer devant
+  lui et reçoit son ombre.
+- Tout se tire au dé, groupe par groupe, avec un cadenas pour garder ce qui
+  plaît ; 15 ambiances prêtes à l'emploi.
+- Une texture décorative en chrome à peindre sur le relief : 8 motifs
+  (volutes, coulures, gouttes, cellules, strates…).
+
+**L'image**
+- Rendu net sur écran Retina, anti-crénelage, bloom, traînées, grain,
+  aberration chromatique, réglages de couleur et de contraste (onglet
+  Vidéo).
+- Plein écran, caméra libre à la souris.
+
+**Le confort**
+- Presets enregistrés : globaux (tous les onglets) ou par onglet ; les
+  derniers réglages sont restaurés au lancement.
+- Pas de plantage sur une erreur : un message s'affiche dans le panneau et
+  dans la fenêtre, le détail est écrit dans `logs/graphic-art.log`.
+
+## Prévu pour la V2
+
+- Enregistrement vidéo d'une session
+- Nouveau panneau de contrôle, plus confortable
+- Explosion du modèle sur le beat
+- Effet d'écho (tunnel, spirales)
+- Contrôle par un contrôleur MIDI
+- Transitions douces entre presets et mode automatique
+- Étude d'un moteur de rendu plus moderne
+
+## Pour développer
 
 ```bash
 pip install -r requirements-dev.txt
 pre-commit install
 ```
 
-`ruff check .` vérifie le style et la gestion des exceptions (lint seulement,
-pas de reformatage) ; `pytest` lance les tests (`-m "not slow"` pour sauter
-les tests lents).
-
-## Utilisation
-
-```bash
-# Lance la fenêtre et le panneau, tout se pilote depuis l'onglet Source
-python main.py
-
-# Lecture directe d'un fichier
-python main.py morceau.mp3
-
-# Avec une image ou un modèle 3D
-python main.py morceau.mp3 --visual photo.png
-python main.py --visual modele.glb
-
-# Forme de test (icosphere, torus, box)
-python main.py --visual primitive:torus
-```
-
-**Raccourcis** : `Espace` pause · `F` plein écran · `U` retour au tore · `Échap` quitter. Tu peux aussi glisser-déposer un modèle 3D dans la fenêtre.
-
-**Caméra** : `⌘`/`Ctrl` + glisser (ou bouton du milieu) pour tourner autour du modèle · `Maj` + glisser pour se déplacer · molette pour zoomer · `C` ou double-clic pour revenir à la vue de départ. La case « Rotation musicale » (onglet Rotation) arrête le modèle pour l'explorer.
-
-### Capturer le son d'une appli
-
-macOS n'expose pas la sortie d'une appli précise. Route-la vers [BlackHole](https://github.com/ExistentialAudio/BlackHole) ou Background Music, puis choisis ce périphérique dans l'onglet Source.
-
-## Structure
+`ruff check .` vérifie le code, `pytest` lance les tests ; les deux tournent
+à chaque `git commit`.
 
 ```
-main.py        assemblage : fenêtre, boucle, actions (classe App)
-app/           sources audio, chargement des modèles, routing, souris, dessin d'une frame
-audio/         analyse du fichier, lecture, analyse live
-visuals/       modèle 3D affiché, chargement des modèles 3D
-gfx/           rendu moderngl, panneau tkinter, matcaps
-background/    fond en formes SDF : paramètres, palettes, shaders de raymarching
-presets.default.json   presets de départ (presets.json, local, n'est pas versionné)
+main.py        assemblage : fenêtre, boucle, actions
+app/           briques de l'appli : sources, chargement, réaction à la musique…
+audio/         analyse du son (fichier et direct), lecture
+visuals/       chargement et préparation des modèles 3D
+gfx/           rendu GPU, panneau de contrôle, presets
+background/    le paysage du fond et ses shaders
 tests/         tests pytest
-logs/          journal de l'appli (graphic-art.log, local) : à lire si quelque chose ne marche pas
-pyproject.toml           règles ruff ; .pre-commit-config.yaml : contrôle au commit
 ```
-
-`audio/` ne connaît ni `visuals/` ni `gfx/` : `main.py` et `app/` font le lien.
-
-## Feuille de route
-
-- Enregistrement vidéo
-- Contrôle MIDI
-- Morphing de presets
-- Nouveaux effets : feedback, palettes, kaléidoscope, glitch
-- Formes procédurales (SDF)

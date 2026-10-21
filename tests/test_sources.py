@@ -1,4 +1,4 @@
-"""Source audio (T22, app/sources.py + audio/player.py) : un fichier
+"""Source audio (T1.15, app/sources.py + audio/player.py) : un fichier
 introuvable, vide ou illisible lève UserError et la source courante
 continue ; fin de fichier, entrée live perdue ; pause."""
 

@@ -1,4 +1,4 @@
-"""Bruit 3D du fond (T16), sans GL.
+"""Bruit 3D du fond (T1.16), sans GL.
 
 La matière du paysage (nappes de couleur, grain, relief de surface,
 veines) et le Volume (warp de la Distorsion, cavités) lisent ce bruit dans

@@ -1,4 +1,4 @@
-"""Relief du Paysage (T16, passe finale), précalculé en numpy, sans GL.
+"""Relief du Paysage (T1.16, passe finale), précalculé en numpy, sans GL.
 
 Le fond n'a plus qu'un générateur, le Paysage. Son relief est fait de
 cartes de hauteur **périodiques** (elles se répètent sans couture : l'objet

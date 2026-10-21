@@ -1,4 +1,4 @@
-"""Onglet « Fond » du panneau (T16), généré depuis background/schema.py.
+"""Onglet « Fond » du panneau (T1.16), généré depuis background/schema.py.
 
 Les widgets viennent des aides de `gfx.controls._run_panel` (slider, liste,
 case, application de valeurs), passées dans `ui` : ce module ne fait que
@@ -78,7 +78,7 @@ def _collapsible(parent, ui, group, title):
     return body
 
 
-# ── groupe Texture (T29) : le motif en boutons à image, essentiel / avancé ──
+# ── groupe Texture (T1.17) : le motif en boutons à image, essentiel / avancé ──
 TEX_COLS = 3   # boutons par ligne
 THUMB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "textures")
 

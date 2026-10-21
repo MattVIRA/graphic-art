@@ -1,4 +1,4 @@
-"""Gestes souris → caméra orbitale (T26, sorti de main.py par T22).
+"""Gestes souris → caméra orbitale (T1.13, sorti de main.py par T1.15).
 
 Cmd/Ctrl + glisser ou bouton du milieu = orbite, Maj + glisser =
 déplacement, double-clic = vue de départ. Les événements arrivent déjà

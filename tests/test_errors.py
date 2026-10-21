@@ -1,4 +1,4 @@
-"""Garde de la boucle (T22, app/errors.py) : erreurs nouvelles / répétées,
+"""Garde de la boucle (T1.15, app/errors.py) : erreurs nouvelles / répétées,
 arrêt après N frames en erreur d'affilée."""
 
 from app.errors import FrameGuard, signature

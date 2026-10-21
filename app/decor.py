@@ -1,4 +1,4 @@
-"""Brique « fond » de l'application (T16) : l'état du fond (sans GL), la
+"""Brique « fond » de l'application (T1.16) : l'état du fond (sans GL), la
 passe GL, le calcul du relief et la résolution automatique, reliés au
 renderer.
 

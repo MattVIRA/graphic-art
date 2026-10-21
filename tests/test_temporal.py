@@ -1,4 +1,4 @@
-"""Accumulation temporelle du fond (T16, passe 5) : décalages de Halton,
+"""Accumulation temporelle du fond (T1.16, passe 5) : décalages de Halton,
 reprojection d'un point du décor, règles de rejet, mélange, poids maximal,
 remises à zéro — la logique que resolve.glsl applique, sans GL."""
 

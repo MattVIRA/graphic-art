@@ -98,7 +98,7 @@ void main() {
 }
 """
 
-# ── Stateless GPU point physics (T1) ─────────────────────────────────────────
+# ── Stateless GPU point physics (T1.2) ─────────────────────────────────────────
 # Static per-point attributes are uploaded ONCE; every frame only a handful
 # of audio-feature uniforms change and the vertex shader recomputes the
 # displacement, color and size. No CPU work, no per-frame upload.
@@ -108,7 +108,7 @@ void main() {
 #   in_color vec3 — base color (texture / vertex colors)
 #   in_aux   vec4 — normal.xyz, mel band
 
-# GLSL chunks shared by the point shader and the mesh shaders (T19): pasted
+# GLSL chunks shared by the point shader and the mesh shaders (T1.9): pasted
 # in place of the //%NOISE% and //%MODEL% markers.
 _NOISE_GLSL = """
 float hash11(float p) {
@@ -159,7 +159,7 @@ def _glsl(src: str) -> str:
 GPU_POINT_VS = _glsl("""
 #version 330
 uniform mat4  u_mvp;
-uniform mat4  u_mv;          // model-view (normals → camera space, T26)
+uniform mat4  u_mv;          // model-view (normals → camera space, T1.13)
 uniform float u_size_scale;
 uniform float u_size_mult;
 uniform float u_time;
@@ -205,7 +205,7 @@ void main() {
 }
 """)
 
-# ── T19: 3D model surface / wireframe ────────────────────────────────────────
+# ── T1.9: 3D model surface / wireframe ────────────────────────────────────────
 # Same deformation as the model points (shared model_displace). Vertex layout:
 # pos3, normal3, color3, band1.
 
@@ -454,7 +454,7 @@ uniform vec2  u_texel;        // source texel size
 uniform int   u_prefilter;    // 1 on the first level
 uniform float u_threshold;
 uniform float u_knee;
-uniform sampler2D u_bgtex;    // fond SDF (T16), sous la scène
+uniform sampler2D u_bgtex;    // fond SDF (T1.16), sous la scène
 uniform float u_bg_gain;      // 0 = pas de fond
 in vec2 v_uv;
 out vec4 f_color;
@@ -528,8 +528,8 @@ uniform sampler2D u_bloom;
 uniform float u_bloom_intensity;
 uniform float u_brightness;   // exposure (linear multiplier)
 uniform vec3  u_bg;           // background color (display space)
-uniform sampler2D u_bgtex;    // fond SDF (T16, HDR linéaire ; alpha = part devant le modèle)
-uniform float u_bg_on;        // 0 = pas de fond : rendu identique à avant T16
+uniform sampler2D u_bgtex;    // fond SDF (T1.16, HDR linéaire ; alpha = part devant le modèle)
+uniform float u_bg_on;        // 0 = pas de fond : rendu identique à avant T1.16
 uniform float u_bg_depth;     // 1 = même espace : une forme peut passer devant le modèle
 uniform sampler2D u_depth;    // profondeur de la scène (0–1)
 uniform vec3  u_gain;         // per-channel RGB gain
@@ -689,10 +689,10 @@ void main() {
 
 NEAR, FAR = 10.0, 8000.0   # plans de la projection (px du monde)
 # lumière principale du Studio (SURFACE_FS), repère caméra : le fond peut
-# l'emprunter pour être éclairé comme le modèle (T16)
+# l'emprunter pour être éclairé comme le modèle (T1.16)
 KEY_LIGHT_DIR = np.array([-0.55, 0.65, 0.55]) / np.linalg.norm([-0.55, 0.65, 0.55])
 KEY_LIGHT_COLOR = np.array([3.2, 2.95, 2.7])
-MODEL_SHADOW_R = 0.85    # ombre du modèle sur le fond (T16), en rayons du modèle
+MODEL_SHADOW_R = 0.85    # ombre du modèle sur le fond (T1.16), en rayons du modèle
 
 
 class GLRenderer:
@@ -710,7 +710,7 @@ class GLRenderer:
 
         self._screen = None
         ctx.enable(moderngl.PROGRAM_POINT_SIZE)
-        # fond SDF (T16) de la frame en cours : posé par set_background(),
+        # fond SDF (T1.16) de la frame en cours : posé par set_background(),
         # dessiné par end_frame() ; une texture 1×1 noire quand il est masqué
         self._bg = None
         self._bg_dummy = ctx.texture((1, 1), 4, dtype="f2")
@@ -725,7 +725,7 @@ class GLRenderer:
         self.overlay_prog = ctx.program(vertex_shader=OVERLAY_VS, fragment_shader=OVERLAY_FS)
         self.grid_prog = ctx.program(vertex_shader=GRID_VS, fragment_shader=GRID_FS)
         self.line_prog = ctx.program(vertex_shader=LINE_VS, fragment_shader=LINE_FS)
-        # 3D model: points (stateless GPU physics, T1), surface, wireframe (T19)
+        # 3D model: points (stateless GPU physics, T1.2), surface, wireframe (T1.9)
         self.gpu_prog = ctx.program(vertex_shader=GPU_POINT_VS,
                                     fragment_shader=POINT_FS)
         self.mesh_prog = ctx.program(vertex_shader=MESH_VS,
@@ -766,7 +766,7 @@ class GLRenderer:
         self._view = _translate(0.0, 0.0, -self.cam_dist)
         self.set_transform(0.0)
 
-        # ── Point VBO / VAO (T1): lazily sized static buffer ──
+        # ── Point VBO / VAO (T1.2): lazily sized static buffer ──
         self._gpu_vbo = None
         self._gpu_vao = None
         self._gpu_count = 0
@@ -802,7 +802,7 @@ class GLRenderer:
 
         # ── Rotation-axis indicator (green line, updated in set_transform) ──
         self._axis_dir = (0.0, 1.0, 0.0)
-        self._model_center = np.zeros(3)   # T16 : ombre du modèle sur le fond
+        self._model_center = np.zeros(3)   # T1.16 : ombre du modèle sur le fond
         self._model_scale = 1.0
         self._axis_vbo = ctx.buffer(reserve=2 * 3 * 4)
         self._axis_vao = ctx.vertex_array(
@@ -859,7 +859,7 @@ class GLRenderer:
 
         # resolved scene (what the trail pass reads)
         self._scene_tex = tex((rw, rh))
-        # profondeur de la scène, lisible par le fond SDF (T16 : même espace)
+        # profondeur de la scène, lisible par le fond SDF (T1.16 : même espace)
         self._depth_tex = ctx.depth_texture((rw, rh))
         self._depth_tex.compare_func = ""      # lue comme une valeur, pas une comparaison
         self._depth_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
@@ -941,7 +941,7 @@ class GLRenderer:
                  @ _translate(orbit_dist, 0.0, 0.0)
                  @ _rotate_x(obj_tilt)
                  @ _scale(scale))
-        # T16 : centre et taille du modèle, pour son ombre sur le fond
+        # T1.16 : centre et taille du modèle, pour son ombre sur le fond
         self._model_center = model[:3, 3].copy()
         self._model_scale = float(scale)
         mv = self._view @ model
@@ -972,7 +972,7 @@ class GLRenderer:
         p["u_time"].value = float(time)
 
     def set_view(self, view: np.ndarray):
-        """Camera (T26): 4×4 view matrix, e.g. gfx.camera.OrbitCamera.
+        """Camera (T1.13): 4×4 view matrix, e.g. gfx.camera.OrbitCamera.
         view_matrix(self.cam_dist, …). Call before set_transform. The studio
         lights live in camera space: they follow the camera, like the
         default solid view of a 3D package."""
@@ -1002,7 +1002,7 @@ class GLRenderer:
     def set_model_look(self, matcap=0, rim=1.0, rim_hue=0.52, orig=0.5,
                        transparent=False, shading=0, roughness=0.4, metal=0.0,
                        ao=1.0, wire_width=1.2, light=1.0):
-        """T19: surface look of the 3D model (studio PBR or matcap, cavity
+        """T1.9: surface look of the 3D model (studio PBR or matcap, cavity
         occlusion, fresnel rim, colors, wireframe line width in logical px)."""
         rim_color = colorsys.hsv_to_rgb(rim_hue % 1.0, 0.65, 1.0)
         self._wire_width = float(wire_width)
@@ -1026,7 +1026,7 @@ class GLRenderer:
         self.gpu_prog["u_size_mult"].value = float(mult)
 
     # ------------------------------------------------------------------
-    # T1: stateless GPU particle path
+    # T1.2: stateless GPU particle path
 
     STATIC_FLOATS = 10    # pos3 + color3 + aux4 (visuals/mesh.build_points)
 
@@ -1056,7 +1056,7 @@ class GLRenderer:
         self._write_frame_uniforms(prog, uniforms, (
             "u_time", "u_inflate", "u_mturb", "u_model_gain"))
         self._points_target().use()
-        # la cible résolue porte maintenant la profondeur (T16) : les points
+        # la cible résolue porte maintenant la profondeur (T1.16) : les points
         # restent dessinés sans test, comme avant
         self.ctx.disable(moderngl.DEPTH_TEST)
         self.ctx.enable(moderngl.BLEND)
@@ -1074,7 +1074,7 @@ class GLRenderer:
                 np.ascontiguousarray(uniforms["u_spectrum"], dtype="f4").tobytes())
 
     # ------------------------------------------------------------------
-    # T19: 3D model surface / wireframe
+    # T1.9: 3D model surface / wireframe
 
     @property
     def has_mesh(self) -> bool:
@@ -1208,7 +1208,7 @@ class GLRenderer:
 
     def set_background(self, bg_pass=None, frame=None, view=None, scale=0.5,
                        unit=1.0):
-        """Fond SDF (T16) de cette frame : `bg_pass` (background.pass_),
+        """Fond SDF (T1.16) de cette frame : `bg_pass` (background.pass_),
         `frame` (background.params.Frame), `view` = vue de la caméra du fond
         (parallaxe), `scale` = résolution du fond / taille interne, `unit` =
         px du monde par unité du fond. Sans argument : pas de fond."""

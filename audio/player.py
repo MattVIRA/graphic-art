@@ -37,7 +37,7 @@ class AudioPlayer:
     @property
     def is_done(self) -> bool:
         # depuis pygame 2.0.1, get_busy() vaut False en pause : sans le test
-        # de pause, la boucle croyait le morceau fini et coupait la source (T22)
+        # de pause, la boucle croyait le morceau fini et coupait la source (T1.15)
         return self._playing and not self._paused and not pygame.mixer.music.get_busy()
 
     @property

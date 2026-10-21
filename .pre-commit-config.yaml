@@ -1,4 +1,4 @@
-# Contrôles au moment du `git commit` (T25) — activés une fois par
+# Contrôles au moment du `git commit` (T1.14) — activés une fois par
 # `pre-commit install`. Hooks locaux : même ruff que le venv et que les
 # hooks Claude Code, rien à télécharger. En urgence : git commit --no-verify.
 repos:

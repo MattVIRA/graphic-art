@@ -5,8 +5,8 @@ comparer la qualité d'image avant / après une modification du renderer.
     python tools/snapshot.py                       # toutes les scènes
     python tools/snapshot.py --visual primitive:torus --tag avant
     python tools/snapshot.py --visual inputs/3D_models/x/scene.gltf
-    python tools/snapshot.py --orbit 40,25 --grid   # caméra orbitale (T26)
-    python tools/snapshot.py --bg-recipe Dunes     # fond (T16) : un paysage intégré
+    python tools/snapshot.py --orbit 40,25 --grid   # caméra orbitale (T1.13)
+    python tools/snapshot.py --bg-recipe Dunes     # fond (T1.16) : un paysage intégré
     python tools/snapshot.py --seed 42 --style surface   # paysage tiré au dé
     python tools/snapshot.py --bg-recipe Collines --bg-set bg_vo_caves=0.6   # + un réglage
     python tools/snapshot.py --bg-recipe Dunes --orbit 30,10 --orbit-speed 12,3 \
@@ -88,7 +88,7 @@ def render_scene(ctx, renderer, particles, p, level, camera, grid=False,
         renderer.bloom_threshold = p["bloom_threshold"]
         renderer.vignette = p["vignette"]
         renderer.set_view(camera.view_matrix(renderer.cam_dist, p["zoom"]))
-        if decor is not None:   # T16 : mêmes sources que le routing (BEAT, KICK…)
+        if decor is not None:   # T1.16 : mêmes sources que le routing (BEAT, KICK…)
             bands = list(f["eq_bands"]) + [f["bass"], f["bass"], 0.0, level]
             decor.frame(renderer, p, f, bands, 1.0 / 60.0,
                         camera.view_matrix(renderer.cam_dist, p["zoom"],
@@ -137,7 +137,7 @@ def main():
     ap.add_argument("--scale", type=float, default=None,
                     help="super-échantillonnage (défaut : celui du panneau)")
     ap.add_argument("--orbit", default=None, metavar="LACET,TANGAGE",
-                    help="position de la caméra orbitale en degrés (T26)")
+                    help="position de la caméra orbitale en degrés (T1.13)")
     ap.add_argument("--orbit-speed", default=None, metavar="LACET,TANGAGE",
                     help="la caméra tourne pendant le rendu (degrés/s)")
     ap.add_argument("--frames", type=int, default=45, help="frames rendues par image")
@@ -145,7 +145,7 @@ def main():
                     help="enregistre aussi une frame toutes les N (_fNNN.png)")
     ap.add_argument("--grid", action="store_true", help="dessiner la grille")
     ap.add_argument("--bg-recipe", default=None, metavar="NOM",
-                    help="fond (T16) : un paysage intégré ("
+                    help="fond (T1.16) : un paysage intégré ("
                          + ", ".join(bg_schema.AMBIANCES) + ")")
     ap.add_argument("--seed", type=int, default=None,
                     help="fond : paysage tiré au dé (après la recette s'il y en a une)")

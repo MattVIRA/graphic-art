@@ -1,4 +1,4 @@
-"""Contrat des features (T25) : AudioAnalyzer renvoie toutes les clés du
+"""Contrat des features (T1.14) : AudioAnalyzer renvoie toutes les clés du
 dictionnaire d'architecture.md (tests/contract.py), avec les bons types. Les visuels et main.py
 s'appuient sur ces clés : un renommage doit casser ce test, pas l'appli.
 

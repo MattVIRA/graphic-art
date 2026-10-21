@@ -1,4 +1,4 @@
-// Fond SDF (T16) — uniforms calculés en Python (background/params.py) et
+// Fond SDF (T1.16) — uniforms calculés en Python (background/params.py) et
 // fonctions de distance de base. Assemblé par background/pass_.py :
 // #version + #define de qualité + uniforms du schéma + ce fichier +
 // landscape.glsl + main.glsl.

@@ -1,5 +1,5 @@
 """
-Visual source: a 3D model (T19) — the only one since T23 (the image and star
+Visual source: a 3D model (T1.9) — the only one since T1.11 (the image and star
 modes were removed). The default visual is the built-in torus.
 
 Model space: centered on the origin, Y up, pixel units. The renderer applies
@@ -79,7 +79,7 @@ class ModelSource:
                      dt: float = 1.0 / 60.0) -> dict:
         """Advance the rotation and return the per-frame uniform dict.
         dt en secondes : les constantes sont réglées pour 60 fps, `k`
-        ramène le pas réel à ce repère (T22 : même vitesse à 30 ou 120 fps)."""
+        ramène le pas réel à ce repère (T1.15 : même vitesse à 30 ou 120 fps)."""
         params = params or {}
         want_up = int(params.get("model_up", 0.0))
         if self._model is not None and want_up != self.model_up:

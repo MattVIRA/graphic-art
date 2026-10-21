@@ -1,5 +1,5 @@
 """
-Images d'aperçu des motifs de la texture du relief (T29), affichées sur
+Images d'aperçu des motifs de la texture du relief (T1.17), affichées sur
 les boutons de l'onglet Fond : un rendu du banc (tools/snapshot.py) par
 motif, vu de dessus sur le paysage « Dunes », recadré hors du modèle.
 

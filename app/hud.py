@@ -18,7 +18,7 @@ class Hud:
         self._last = None
 
     def build(self, features, tempo, paused, mode, n, notice=None):
-        """`notice` (T22) : message d'erreur affiché en rouge à la place de
+        """`notice` (T1.15) : message d'erreur affiché en rouge à la place de
         l'aide, le temps que l'appelant le garde."""
         line = (f"BPM {tempo:.0f}  |  RMS {features['rms']:.2f}  |  "
                 f"BASS {features['bass']:.2f}  |  {(mode or '…').upper()}  |  {n} pts")

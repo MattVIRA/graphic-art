@@ -1,4 +1,4 @@
-"""Gestes souris → caméra (T26, app/input.py) : orbite, déplacement,
+"""Gestes souris → caméra (T1.13, app/input.py) : orbite, déplacement,
 double-clic, sans fenêtre GLFW."""
 
 import glfw

@@ -1,4 +1,4 @@
-"""Chargement des modèles (T22, app/loader.py) : chemin invalide refusé
+"""Chargement des modèles (T1.15, app/loader.py) : chemin invalide refusé
 tout de suite, fichier illisible signalé à la fin du thread, seul le
 dernier modèle demandé est installé."""
 

@@ -1,4 +1,4 @@
-"""Routing Physique (T22) : enveloppes, ressort, couche percussive, sources
+"""Routing Physique (T1.15) : enveloppes, ressort, couche percussive, sources
 → effets, et paramètres dérivés passés au renderer (app/frame.py)."""
 
 import numpy as np

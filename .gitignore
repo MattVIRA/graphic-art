@@ -11,7 +11,7 @@ __pycache__/
 *.webp
 *.gif
 *.bmp
-# … sauf les images d'aperçu des motifs du panneau (T29, tools/texture_thumbs.py)
+# … sauf les images d'aperçu des motifs du panneau (T1.17, tools/texture_thumbs.py)
 !gfx/assets/textures/*.png
 
 dev-instructions/
@@ -31,7 +31,7 @@ inputs/
 *.stl
 *.ply
 
-# Captures vidéo (T5)
+# Captures vidéo (T2.1)
 captures/
 
 # Config locale Claude Code
@@ -42,11 +42,11 @@ captures/
 .pytest_cache/
 .ruff_cahce/
 
-# Presets utilisateur (T24) : seul presets.default.json est versionné
+# Presets utilisateur (T1.12) : seul presets.default.json est versionné
 presets.json
 presets.json.tmp
 presets.backup.json
 presets.corrupt-*.json
 
-# Journal de l'appli (T22)
+# Journal de l'appli (T1.15)
 logs/

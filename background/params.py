@@ -1,4 +1,4 @@
-"""État du fond d'une frame à l'autre (T16), sans GL.
+"""État du fond d'une frame à l'autre (T1.16), sans GL.
 
 `BackgroundState.step()` prend les réglages du panneau, les features audio
 lissées et les sources du routing, et rend tout ce que la passe GL envoie

@@ -1,4 +1,4 @@
-// Texture du relief (T29) — réglages bg_tex_* (background/schema.py).
+// Texture du relief (T1.17) — réglages bg_tex_* (background/schema.py).
 // Une décoration peinte sur le relief, fixe : calculée dans shade()
 // (main.glsl) une fois par pixel, après la marche, jamais dans map() — la
 // forme du terrain ne change pas. Elle est lue au point déformé du terrain
@@ -290,7 +290,7 @@ vec3 tex_emboss(Relief r, vec3 n, float mask, float sharp) {
     return transpose(u_rot) * ns;
 }
 
-// reflets du studio, d'après le prototype (t29/modes_liquides.html) : un
+// reflets du studio, d'après le prototype (t1.17/modes_liquides.html) : un
 // sol très sombre, une ligne d'horizon fine, un ciel moyen teinté par celui
 // du fond, des bandes de lumière fixes dans le décor (le relief fait bouger
 // les reflets) et un plafond lumineux ; une surface rugueuse les fond dans

@@ -1,4 +1,4 @@
-"""Source audio courante : fichier, capture live ou silence (T0, T22).
+"""Source audio courante : fichier, capture live ou silence (T1.1, T1.15).
 
 Une seule source à la fois ; changer de source n'arrête l'ancienne qu'une
 fois la nouvelle prête (un fichier illisible ne coupe pas la musique).

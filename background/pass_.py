@@ -1,4 +1,4 @@
-"""Passe GL du fond (T16) : un programme par niveau de qualité, tous
+"""Passe GL du fond (T1.16) : un programme par niveau de qualité, tous
 compilés au démarrage (pas de binaires de programme fiables sur macOS :
 compiler en cours de route ferait une saccade). Plus une texture HDR à la
 résolution du fond, une palette 1D, la texture 3D de bruit de la matière,

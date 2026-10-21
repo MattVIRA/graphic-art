@@ -1,4 +1,4 @@
-// Fond SDF (T16, passe 5) — résolution : accumulation temporelle et
+// Fond SDF (T1.16, passe 5) — résolution : accumulation temporelle et
 // agrandissement en une passe, à 1,5 × la résolution du fond (au plus la
 // résolution interne ; le composite fait le reste en bilinéaire).
 //

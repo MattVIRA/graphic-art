@@ -1,4 +1,4 @@
-"""Chargement des modèles 3D dans un thread (T19, sorti de main.py par T22).
+"""Chargement des modèles 3D dans un thread (T1.9, sorti de main.py par T1.15).
 
 Le fichier est lu et préparé (`visuals.mesh.prepare`) hors de la boucle de
 rendu : l'animation continue et le modèle courant reste affiché jusqu'à ce

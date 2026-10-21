@@ -1,4 +1,4 @@
-"""Niveaux de qualité du fond (T16) et résolution automatique.
+"""Niveaux de qualité du fond (T1.16) et résolution automatique.
 
 Un niveau = des `#define` du shader (nombre de pas, ombres, occlusion) :
 chaque niveau est un programme compilé à part, au démarrage. « Auto » prend

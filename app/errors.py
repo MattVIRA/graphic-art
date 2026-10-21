@@ -1,4 +1,4 @@
-"""Erreurs (T22) : erreurs dues à l'utilisateur et garde de la boucle.
+"""Erreurs (T1.15) : erreurs dues à l'utilisateur et garde de la boucle.
 
 - `UserError` : un fichier introuvable, vide ou illisible n'est pas un bug ;
   son message suffit (pas de trace) et la source / le modèle courant

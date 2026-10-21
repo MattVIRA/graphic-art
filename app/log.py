@@ -1,4 +1,4 @@
-"""Journal de l'appli (T22) : console + fichier `logs/graphic-art.log`.
+"""Journal de l'appli (T1.15) : console + fichier `logs/graphic-art.log`.
 
 Le fichier tourne (1 Mo × 3) et garde l'horodatage et les traces complètes :
 c'est ce qu'il faut regarder quand l'appli a été lancée sans terminal

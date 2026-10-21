@@ -9,17 +9,17 @@ drawn as points, surface or wireframe (style chosen in the panel).
   --visual primitive:box    → another built-in shape (icosphere, torus, box)
 
 Keys: SPACE pause/resume  |  ESC quit  |  U back to the torus  |  F fullscreen
-Mouse (T26): Cmd/Ctrl + drag or middle drag = orbit  |  Shift + drag = pan  |
+Mouse (T1.13): Cmd/Ctrl + drag or middle drag = orbit  |  Shift + drag = pan  |
              wheel = zoom  |  C or double-click = back to the default view
 
 The window is a GLFW window (native Retina framebuffer); pygame only provides
 the audio playback (mixer) and the HUD font.
 
-Assemblage seulement (T22) : chaque responsabilité vit dans un module de
+Assemblage seulement (T1.15) : chaque responsabilité vit dans un module de
 `app/` — sources audio, chargement des modèles, routing, gestes souris,
 dessin d'une frame, fenêtre, HUD, journal, erreurs.
 
-Frontières d'erreur (T22) : chaque action de l'utilisateur passe par
+Frontières d'erreur (T1.15) : chaque action de l'utilisateur passe par
 `App.dispatch()`, chaque frame par la garde de `App.run()` ; une erreur est
 journalisée (logs/graphic-art.log) et affichée dans le panneau et le HUD,
 l'appli continue. L'arrêt sauvegarde les réglages dans tous les cas.
@@ -98,13 +98,13 @@ class App:
         self.hud = Hud(WIDTH, self.renderer.dpr)
         self.notice = None            # (message, fin d'affichage) : erreur au HUD
         self.panel = ControlPanel()   # second window with live sliders
-        self.decor = Decor(ctx, self.report)   # T16 : fond en formes SDF
+        self.decor = Decor(ctx, self.report)   # T1.16 : fond en formes SDF
         self.panel_alive = True
         self.sources = SourceManager(on_title=self.window.set_title,
                                      report=self.report)
         self.loader = ModelLoader(self.model, report=self._model_failed)
 
-        self.camera = OrbitCamera()   # T26: orbit / pan / zoom with the mouse
+        self.camera = OrbitCamera()   # T1.13: orbit / pan / zoom with the mouse
         if self.panel.camera_state:
             self.camera.load_state(self.panel.camera_state)
         self.gestures = MouseGestures(self.camera)
@@ -113,7 +113,7 @@ class App:
 
         self.running = True
         self.axis_precession = 0.0    # accumulated axis spin around the world vertical
-        self.next_monitor = 0.0       # T8: next time a monitoring packet is due
+        self.next_monitor = 0.0       # T1.8: next time a monitoring packet is due
         self.budget_wanted, self.budget_t = None, 0.0   # debounced n_points rebuild
         self.hud_next = 0.0           # next HUD text refresh
 
@@ -250,7 +250,7 @@ class App:
         t = self.window.time()
         renderer = self.renderer
         frame.apply_look(renderer, p, fx, routed.beat_env, t)
-        # ── GPU draw pass (T1: stateless physics, the CPU only sends uniforms) ──
+        # ── GPU draw pass (T1.2: stateless physics, the CPU only sends uniforms) ──
         rp = self.model.gpu_uniforms(features, frame.model_params(p, fx),
                                      time_s=t, dt=dt)
         if self.model.rev != self.gpu_rev:
@@ -265,7 +265,7 @@ class App:
         self.camera.update(dt)   # before set_transform (view matrix)
         shake = frame.shake(fx, t)
         renderer.set_view(self.camera.view_matrix(renderer.cam_dist, p["zoom"], shake))
-        # T16 : le fond suit la caméra selon « Parallaxe »
+        # T1.16 : le fond suit la caméra selon « Parallaxe »
         bg_view = self.camera.view_matrix(renderer.cam_dist, p["zoom"], shake,
                                           amount=p["bg_comp_parallax"])
         self.decor.frame(renderer, p, features, routed.bands, dt, bg_view,
@@ -301,7 +301,7 @@ class App:
             self.budget_wanted = None
 
     def _send_monitor(self, routed):
-        """T8: monitoring packet for the panel (VU meters + status bar)."""
+        """T1.8: monitoring packet for the panel (VU meters + status bar)."""
         now = self.window.time()
         if now < self.next_monitor:
             return

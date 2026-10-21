@@ -1,4 +1,4 @@
-"""Fond SDF (T16) : schéma des paramètres, paysage, macros, dé, recettes,
+"""Fond SDF (T1.16) : schéma des paramètres, paysage, macros, dé, recettes,
 état d'une frame à l'autre, bruit 3D, palettes, résolution automatique —
 tout ce qui se teste sans GL (les cartes du relief : tests/test_terrain.py)."""
 

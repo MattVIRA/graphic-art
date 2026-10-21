@@ -1,4 +1,4 @@
-"""Fenêtre GLFW + contexte OpenGL 3.3 core, entrées et cadence (T21, T22).
+"""Fenêtre GLFW + contexte OpenGL 3.3 core, entrées et cadence (T1.10, T1.15).
 
 Les callbacks GLFW ne font qu'empiler des événements dans `events` ; la
 boucle principale les traite une fois par frame.
@@ -11,7 +11,7 @@ import glfw
 
 class FrameClock:
     """dt + fps measurement and a frame-rate cap. L'animation suit dt
-    depuis T22 ; le cap évite de dessiner plus d'images qu'utile."""
+    depuis T1.15 ; le cap évite de dessiner plus d'images qu'utile."""
 
     def __init__(self, fps: int):
         self.period = 1.0 / fps

@@ -1,5 +1,5 @@
 """
-Stockage des presets (T24) — sans tkinter, testable seul.
+Stockage des presets (T1.12) — sans tkinter, testable seul.
 
 Fichiers à la racine du projet :
     presets.default.json   versionné : presets de départ, copié au 1er lancement
@@ -116,7 +116,7 @@ def global_names(d: dict) -> list[str]:
 
 # ── Presets d'onglet : {onglet: {nom: {clé: val}}} sous "_tab_presets" ─
 def _is_stale_copy(user: dict, builtin: dict) -> bool:
-    """Ancienne copie d'un preset intégré (avant T24 les intégrés étaient
+    """Ancienne copie d'un preset intégré (avant T1.12 les intégrés étaient
     recopiés dans le fichier) : mêmes valeurs, éventuellement moins de
     clés (bandes ajoutées depuis)."""
     return all(builtin.get(k) == v for k, v in user.items())

@@ -1,4 +1,4 @@
-"""Palettes du fond (T16), calculées en numpy puis envoyées au shader comme
+"""Palettes du fond (T1.16), calculées en numpy puis envoyées au shader comme
 une petite texture 1D (`SIZE` couleurs, linéaires).
 
 Le shader lit la palette d'un bout à l'autre, sans miroir ni répétition

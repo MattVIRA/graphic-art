@@ -1,5 +1,5 @@
 """
-Caméra orbitale à la souris (T26) — calculs seuls, sans GL ni GLFW.
+Caméra orbitale à la souris (T1.13) — calculs seuls, sans GL ni GLFW.
 
 La caméra tourne autour d'une cible (lacet / tangage borné), à une distance
 `base_dist / zoom`. Vue par défaut (lacet = tangage = 0, cible à l'origine,
@@ -140,7 +140,7 @@ class OrbitCamera:
         extra_zoom : slider Zoom du panneau ; shake : décalage écran (px) de
         la « Secousse caméra » ; amount : part du geste de la souris prise en
         compte (1 = la caméra, 0 = la vue de départ ; « Parallaxe » du fond,
-        T16) — les angles, la cible et le zoom sont mélangés, pas les
+        T1.16) — les angles, la cible et le zoom sont mélangés, pas les
         matrices, pour rester une vraie rotation."""
         k = min(max(float(amount), 0.0), 1.0)
         z = max(self.zoom ** k * extra_zoom, 0.05)

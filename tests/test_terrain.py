@@ -1,4 +1,4 @@
-"""Relief du Paysage (T16, passe finale) : cartes de hauteur précalculées et
+"""Relief du Paysage (T1.16, passe finale) : cartes de hauteur précalculées et
 calcul en arrière-plan (background/terrain.py), sans GL. Cartes réduites
 (128 ou 256 texels : à 128, la carte ne garde que 2 couches) : le calcul
 reste rapide."""

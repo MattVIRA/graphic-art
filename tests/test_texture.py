@@ -1,4 +1,4 @@
-"""Texture du relief (T29) : réglages bg_tex_*, sans GL — table du schéma,
+"""Texture du relief (T1.17) : réglages bg_tex_*, sans GL — table du schéma,
 texture fixe (ni musique ni macros), dé, uniforms."""
 
 import dataclasses
@@ -106,7 +106,7 @@ def test_lock_keeps_the_texture():
 
 
 def test_old_presets_give_no_texture():
-    """Un preset d'avant T29 n'a aucune clé bg_tex_* : le panneau remet les
+    """Un preset d'avant T1.17 n'a aucune clé bg_tex_* : le panneau remet les
     réglages absents à leur défaut, donc Motif « Aucun »."""
     for name, vals in schema.AMBIANCES.items():
         if name not in schema.TEX_AMBIANCES:

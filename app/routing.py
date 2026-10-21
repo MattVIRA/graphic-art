@@ -1,4 +1,4 @@
-"""Features audio → effets (T4, T21, T22).
+"""Features audio → effets (T1.5, T1.10, T1.15).
 
 Chaque frame : lissage attack/release des features, couche percussive
 (ressort du KICK, flash SNARE, énergie de section), puis routing Physique —
@@ -104,7 +104,7 @@ class Reactor:
     frame en sources de routing et en effets."""
 
     def __init__(self):
-        self.envelope = Envelope()   # T4: attack/release smoothing
+        self.envelope = Envelope()   # T1.5: attack/release smoothing
         self.kick_spring = Spring()  # KICK band: elastic response to each kick
         self.last_kick = self.last_snare = 0
         self.snare_env = 0.0

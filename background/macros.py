@@ -1,4 +1,4 @@
-"""Macros du fond (T16) : un curseur qui déplace plusieurs paramètres.
+"""Macros du fond (T1.16) : un curseur qui déplace plusieurs paramètres.
 
 Chaque paramètre déclare dans le schéma son écart quand une macro passe de
 0,5 (neutre) à 1 ; à 0 l'écart est opposé. Plusieurs macros sur un même

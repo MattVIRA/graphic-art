@@ -1,4 +1,4 @@
-# Outillage qualité (T25). Lint seulement : pas de `ruff format`, qui
+# Outillage qualité (T1.14). Lint seulement : pas de `ruff format`, qui
 # réécrirait ~45 % des lignes et casserait les commentaires alignés.
 
 [tool.ruff]
@@ -13,9 +13,9 @@ select = [
     "E722",          # except nu
     "BLE001",        # except Exception : seulement aux frontières, avec # noqa justifié
     "S110", "S112",  # except … : pass / continue silencieux
-    "T201",          # print : passer par logging (app/log.py, T22)
+    "T201",          # print : passer par logging (app/log.py, T1.15)
     "TRY400",        # dans un except : logger.exception plutôt que logger.error
-    "C901",          # complexité > 10 : découper (T22)
+    "C901",          # complexité > 10 : découper (T1.15)
     "ERA001",        # code commenté laissé en place
 ]
 
